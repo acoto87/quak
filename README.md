@@ -5,12 +5,12 @@ Quack & Splash is a zero-frustration, toddler-friendly 3D pond toy. Swim a duck 
 ## Features
 
 - Animated 3D water with shader-driven waves and ripple feedback
-- Textured OBJ duck with reflection, shadow, bobbing, and wake effects
-- Lily-pad collisions, bubbles, splash particles, and camera shake
-- Touch-follow steering with immediate water feedback and tap-to-quack
+- Textured OBJ duck with day/night reflection, sleep/wake, and zoomies
+- Bouncing musical lily pads, poppable bubbles, fireflies, and hidden rainbows
+- Touch-follow steering, obstacle routing, finger trails, and scaled splashes
 - Keyboard and gamepad controls for desktop development and accessibility
 - Fixed 60 Hz simulation behind SDL3's callback API
-- Procedural audio with bounded quack and splash voice pools
+- Procedural audio with bounded quack variants, splash, pop, and lily-note voices
 - SDL3 GPU renderer using Direct3D 12 and DXIL on the current Windows build
 
 ## Current Platform Support
@@ -67,30 +67,43 @@ Set `-DQUAK_SHOW_DEBUG_GEOMETRY=ON` during configuration to render the developer
 | Input | Action |
 |---|---|
 | Hold or drag one finger | Swim smoothly toward the touched pond location |
+| Hold over a lily pad | Circle the lily continuously |
 | Touch water | Create an immediate ripple |
-| Quick tap | Create a localized splash and make the duck quack |
+| Release a tap or drag | Create a splash scaled by hold time or travel distance |
+| Quick tap | Make the duck quack |
+| Tap a lily pad | Bounce it and play its musical note |
+| Tap a floating bubble | Pop it into sparkles |
+| Tap the duck four times | Trigger short duck zoomies |
 | Additional fingers | Create independent water feedback |
+| Left mouse click / drag | Simulate one touch for desktop testing |
+| `Ctrl` + left mouse drag | Orbit the development camera |
+| Mouse wheel | Zoom the development camera |
 | `WASD` / Arrow keys | Swim in world-space directions |
 | `Space` / `Enter` | Quack and splash |
 | Left stick | Swim |
 | Any gamepad button | Quack and splash |
-| Left mouse drag / wheel | Orbit / zoom the development camera |
 | `Escape` | Quit |
 
 Touch input tracks up to ten fingers. The oldest active finger controls swimming; other fingers still produce ripples. Releasing the primary finger hands control to the next oldest active finger.
+
+The duck falls asleep after a quiet pause and wakes when touched or moved. The pond transitions automatically between day and night, with fireflies appearing after dark. Repeated splashes and bubble pops reveal bounded rainbow celebrations.
 
 ## Source Layout
 
 ```text
 src/main.c       SDL callbacks, fixed-step timing, lifecycle, event dispatch
 src/input.c      Keyboard/gamepad intent, touch tracking, gesture classification
+src/interaction.c Fixed-size FIFO for one-shot gameplay input
+src/activities.c Free-play activity director and interaction dispatch
 src/game.c       Duck steering, collisions, ripples, particles, idle behavior
+src/pond_objects.c Generic fixed-size pond-object pool and hit testing
+src/duck_animation.c Whole-duck animation state and transform outputs
 src/render.c     SDL GPU device, camera, pipelines, scene rendering
 src/duck.c       OBJ/JPEG loading, GPU upload, duck rendering
 src/audio.c      Procedural PCM generation and bounded voice pools
 src/types.h      Shared constants and application state
 shaders/dxil/    HLSL source compiled to DXIL by CMake
-tests/           Headless simulation and input tests
+tests/           Headless simulation, interaction, and baseline tests
 ```
 
 The game uses a left-handed world: +X is right, +Y is up, and +Z is forward. SDL GPU projection uses a zero-to-one depth range.
