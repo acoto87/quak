@@ -19,25 +19,41 @@ typedef struct {
     float _pad[3];
 } FragmentUniform;
 
-    static void apply_obj_transform(float *pos, float *out_pos)
-    {
-        const float tx = -0.12f;
-        const float ty = -3.2f;
-        const float tz = -0.15f;
-        const float rx = -3.14159265f / 2.0f;
+static void apply_obj_transform(const float *pos, float *out_pos)
+{
+    const float tx = -0.12f;
+    const float ty = -3.2f;
+    const float tz = -0.15f;
+    const float rx = -3.14159265f / 2.0f;
+    float x = pos[0] + tx;
+    float y = pos[1] + ty;
+    float z = pos[2] + tz;
 
-        float x = pos[0] + tx;
-        float y = pos[1] + ty;
-        float z = pos[2] + tz;
+    out_pos[0] = x;
+    out_pos[1] = z * cosf(rx) - y * sinf(rx);
+    out_pos[2] = z * sinf(rx) + y * cosf(rx);
+}
 
-        out_pos[0] = x;
-        out_pos[1] = z * cosf(rx) - y * sinf(rx);
-        out_pos[2] = z * sinf(rx) + y * cosf(rx);
+static void apply_obj_normal(const float *normal, float *out_normal)
+{
+    const float rx = -3.14159265f / 2.0f;
+    float length;
+
+    out_normal[0] = normal[0];
+    out_normal[1] = normal[2] * cosf(rx) - normal[1] * sinf(rx);
+    out_normal[2] = normal[2] * sinf(rx) + normal[1] * cosf(rx);
+    length = sqrtf(out_normal[0] * out_normal[0]
+                 + out_normal[1] * out_normal[1]
+                 + out_normal[2] * out_normal[2]);
+    if (length > 0.00001f) {
+        out_normal[0] /= length;
+        out_normal[1] /= length;
+        out_normal[2] /= length;
     }
+}
 
-    /* Parse an OBJ file into a flat interleaved buffer:
-     *   [ px py pz  u v  nx ny nz ] × vertex_count   (8 floats per vertex)       */
-    static bool load_obj_mesh(const char *path, float **out_buf, int *out_count)
+/* Parse an OBJ file into [px py pz u v nx ny nz] vertices. */
+static bool load_obj_mesh(const char *path, float **out_buf, int *out_count)
 
 {
     size_t sz;
@@ -114,20 +130,18 @@ typedef struct {
                     int pidx = fv[tri[k]][0];
                     int tidx = fv[tri[k]][1];
                     int nidx = fv[tri[k]][2];
-                     float transformed_pos[3];
-                     float transformed_norm[3];
-                     apply_obj_transform(&pos[pidx*3], transformed_pos);
-                     transformed_norm[0] = norm[nidx*3+0];
-                     transformed_norm[1] = norm[nidx*3+1];
-                     transformed_norm[2] = norm[nidx*3+2];
-                     buf[vcount*8+0] = transformed_pos[0];
-                     buf[vcount*8+1] = transformed_pos[1];
-                     buf[vcount*8+2] = transformed_pos[2];
-                     buf[vcount*8+3] = uv[tidx*2+0];
-                     buf[vcount*8+4] = uv[tidx*2+1];
-                     buf[vcount*8+5] = transformed_norm[0];
-                     buf[vcount*8+6] = transformed_norm[1];
-                     buf[vcount*8+7] = transformed_norm[2];
+                    float transformed_pos[3];
+                    float transformed_norm[3];
+                    apply_obj_transform(&pos[pidx*3], transformed_pos);
+                    apply_obj_normal(&norm[nidx*3], transformed_norm);
+                    buf[vcount*8+0] = transformed_pos[0];
+                    buf[vcount*8+1] = transformed_pos[1];
+                    buf[vcount*8+2] = transformed_pos[2];
+                    buf[vcount*8+3] = uv[tidx*2+0];
+                    buf[vcount*8+4] = uv[tidx*2+1];
+                    buf[vcount*8+5] = transformed_norm[0];
+                    buf[vcount*8+6] = transformed_norm[1];
+                    buf[vcount*8+7] = transformed_norm[2];
 
                     vcount++;
                 }
@@ -362,7 +376,6 @@ bool duck_init(AppState *as)
                  "%sassets/10602_Rubber_Duck_v1_L3.obj", base ? base : "");
     SDL_snprintf(tex_path, sizeof(tex_path),
                  "%sassets/10602_Rubber_Duck_v1_diffuse.jpg", base ? base : "");
-    SDL_free((void *)base);
 
     if (!load_obj_mesh(obj_path, &verts, &vc))
         return false;
@@ -378,7 +391,8 @@ bool duck_init(AppState *as)
     SDL_free(verts);
 
     if (!create_texture_from_jpg(as, tex_path, &as->duck_tex, &as->duck_sampler)) {
-        SDL_Log("duck_init: continuing without texture");
+        SDL_Log("duck_init: diffuse texture is required");
+        return false;
     }
 
     return true;
@@ -386,14 +400,15 @@ bool duck_init(AppState *as)
 
 void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
 {
-    if (!cmd || !pass || !as->duck_vbuf || as->duck_obj_count == 0 || !as->duck_pipeline)
+    if (!cmd || !pass || !as->duck_vbuf || !as->duck_tex || !as->duck_sampler
+        || as->duck_obj_count == 0 || !as->duck_pipeline)
         return;
 
     mat4x4 model;
     mat4x4 refl;
     mat4x4_identity(model);
     mat4x4_translate_in_place(model, as->duck_x, as->duck_y_offset, as->duck_z);
-    mat4x4_rotate_Y(model, model, as->duck_angle + DUCK_ANGLE_OFFSET);
+    mat4x4_rotate_Y(model, model, DUCK_MODEL_YAW(as->duck_angle));
     mat4x4_rotate_X(model, model, 3.14159265f / 2.0f);
     mat4x4_scale_aniso(model, model, DUCK_SCALE, DUCK_SCALE, DUCK_SCALE);
     mat4x4_translate_in_place(model, 0.0f, DUCK_OBJ_LIFT, 0.0f);
@@ -417,7 +432,7 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
 
     mat4x4_identity(refl);
     mat4x4_translate_in_place(refl, as->duck_x, -as->duck_y_offset, as->duck_z);
-    mat4x4_rotate_Y(refl, refl, as->duck_angle + DUCK_ANGLE_OFFSET);
+    mat4x4_rotate_Y(refl, refl, DUCK_MODEL_YAW(as->duck_angle));
     mat4x4_rotate_X(refl, refl, -3.14159265f / 2.0f);
     mat4x4_scale_aniso(refl, refl, DUCK_SCALE, -DUCK_SCALE, DUCK_SCALE);
     mat4x4_translate_in_place(refl, 0.0f, DUCK_OBJ_LIFT, 0.0f);
@@ -438,13 +453,11 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
     SDL_BindGPUVertexBuffers(pass, 0,
                              &(SDL_GPUBufferBinding){ as->duck_vbuf, 0 }, 1);
 
-    if (as->duck_tex && as->duck_sampler) {
-        SDL_GPUTextureSamplerBinding binding = {
-            .texture = as->duck_tex,
-            .sampler = as->duck_sampler
-        };
-        SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
-    }
+    SDL_GPUTextureSamplerBinding binding = {
+        .texture = as->duck_tex,
+        .sampler = as->duck_sampler
+    };
+    SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
 
     SDL_PushGPUVertexUniformData(cmd, 1, &refl_transform, (Uint32)sizeof(refl_transform));
     SDL_PushGPUFragmentUniformData(cmd, 0, &frag, (Uint32)sizeof(frag));

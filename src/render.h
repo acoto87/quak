@@ -2,7 +2,7 @@
 #include "types.h"
 #include <linmath.h>
 
-/* Normal matrix = transpose(inverse(model)), packed column-major for GL. */
+/* Normal matrix = transpose(inverse(model)), packed in shader column order. */
 void compute_nmat(float *nmat9, mat4x4 model);
 
 /* ── Scene lifecycle ─────────────────────────────────────────────────────── */

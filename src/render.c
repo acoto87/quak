@@ -2,6 +2,14 @@
 #include "duck.h"
 #include <math.h>
 
+#ifndef QUAK_GPU_VALIDATION
+#define QUAK_GPU_VALIDATION 0
+#endif
+
+#ifndef QUAK_SHOW_DEBUG_GEOMETRY
+#define QUAK_SHOW_DEBUG_GEOMETRY 0
+#endif
+
 typedef struct {
     mat4x4 u_proj;
     mat4x4 u_view;
@@ -31,6 +39,16 @@ typedef struct {
     SDL_GPUShader *fragment;
 } ShaderPair;
 
+typedef struct {
+    SDL_GPUShaderFormat format;
+    const char *directory;
+    const char *suffix;
+} ShaderAssetSpec;
+
+static const ShaderAssetSpec DXIL_SHADER_ASSETS = {
+    SDL_GPU_SHADERFORMAT_DXIL, "dxil", ".dxil"
+};
+
 const LilyPad LILY_PADS[LILY_PAD_COUNT] = {
     {-6.0f, -6.5f, 1.2f},
     { 7.0f, -5.5f, 1.0f},
@@ -40,6 +58,7 @@ const LilyPad LILY_PADS[LILY_PAD_COUNT] = {
     { 7.5f,  2.5f, 1.2f}
 };
 
+#if QUAK_SHOW_DEBUG_GEOMETRY
 static const float AXIS_VERTS[] = {
     0.f, 0.f, 0.f,
     20.f, 0.f, 0.f,
@@ -48,6 +67,7 @@ static const float AXIS_VERTS[] = {
     0.f, 0.f, 0.f,
     0.f, 0.f, 20.f
 };
+#endif
 
 static void fill_nmat_columns(vec4 *cols, const float *nmat9)
 {
@@ -75,6 +95,13 @@ static void gen_water_grid(float **vout, int *vcount,
     float extent = WORLD_BOUND;
     *vcount = N * N;
     float *v = (float *)SDL_malloc((size_t)(N * N * 5) * sizeof(float));
+    if (!v) {
+        *vout = NULL;
+        *iout = NULL;
+        *vcount = 0;
+        *icount = 0;
+        return;
+    }
     for (int zi = 0; zi < N; zi++) {
         for (int xi = 0; xi < N; xi++) {
             float x = -extent + (float)xi * (extent * 2.f) / (float)(N - 1);
@@ -92,6 +119,14 @@ static void gen_water_grid(float **vout, int *vcount,
     *icount = Q * Q * 6;
     unsigned int *id =
         (unsigned int *)SDL_malloc((size_t)(*icount) * sizeof(unsigned int));
+    if (!id) {
+        SDL_free(v);
+        *vout = NULL;
+        *iout = NULL;
+        *vcount = 0;
+        *icount = 0;
+        return;
+    }
     int k = 0;
     for (int zi = 0; zi < Q; zi++) {
         for (int xi = 0; xi < Q; xi++) {
@@ -110,6 +145,10 @@ static int gen_disc_flat(float **out)
 {
     int N = 24;
     float *buf = (float *)SDL_malloc((size_t)(N * 3 * 6) * sizeof(float));
+    if (!buf) {
+        *out = NULL;
+        return 0;
+    }
     int vi = 0;
     for (int i = 0; i < N; i++) {
         float a0 = (float)i     / N * 2.f * 3.14159265f;
@@ -128,13 +167,22 @@ static int gen_disc_flat(float **out)
     return N * 3;
 }
 
-static char *load_binary_asset(const char *relative_path, size_t *out_size)
+static const ShaderAssetSpec *get_shader_asset_spec(const AppState *as)
 {
-    char *base = SDL_GetBasePath();
+    if (as->shader_format == SDL_GPU_SHADERFORMAT_DXIL)
+        return &DXIL_SHADER_ASSETS;
+    return NULL;
+}
+
+static char *load_binary_asset(const ShaderAssetSpec *spec, const char *relative_path,
+                               size_t *out_size)
+{
+    const char *base = SDL_GetBasePath();
     char path[1024];
     void *raw;
 
-    SDL_snprintf(path, sizeof(path), "%sassets/shaders/dxil/%s", base ? base : "", relative_path);
+    SDL_snprintf(path, sizeof(path), "%sassets/shaders/%s/%s",
+                 base ? base : "", spec->directory, relative_path);
     raw = SDL_LoadFile(path, out_size);
     if (!raw)
         SDL_Log("Shader asset: cannot open '%s' — %s", path, SDL_GetError());
@@ -151,12 +199,18 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
     size_t vert_size = 0, frag_size = 0;
     Uint8 *vert_code = NULL;
     Uint8 *frag_code = NULL;
+    const ShaderAssetSpec *spec = get_shader_asset_spec(as);
 
-    SDL_snprintf(vert_name, sizeof(vert_name), "%s.vert.dxil", base_name);
-    SDL_snprintf(frag_name, sizeof(frag_name), "%s.frag.dxil", base_name);
+    if (!spec) {
+        SDL_Log("No shader asset mapping for GPU format 0x%x", (unsigned int)as->shader_format);
+        return pair;
+    }
 
-    vert_code = (Uint8 *)load_binary_asset(vert_name, &vert_size);
-    frag_code = (Uint8 *)load_binary_asset(frag_name, &frag_size);
+    SDL_snprintf(vert_name, sizeof(vert_name), "%s.vert%s", base_name, spec->suffix);
+    SDL_snprintf(frag_name, sizeof(frag_name), "%s.frag%s", base_name, spec->suffix);
+
+    vert_code = (Uint8 *)load_binary_asset(spec, vert_name, &vert_size);
+    frag_code = (Uint8 *)load_binary_asset(spec, frag_name, &frag_size);
     if (!vert_code || !frag_code) {
         SDL_free(vert_code);
         SDL_free(frag_code);
@@ -168,7 +222,7 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
                                           .code_size = vert_size,
                                           .code = vert_code,
                                           .entrypoint = "main",
-                                          .format = SDL_GPU_SHADERFORMAT_DXIL,
+                                          .format = spec->format,
                                           .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                           .num_samplers = 0,
                                           .num_storage_textures = 0,
@@ -181,7 +235,7 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
                                             .code_size = frag_size,
                                             .code = frag_code,
                                             .entrypoint = "main",
-                                            .format = SDL_GPU_SHADERFORMAT_DXIL,
+                                            .format = spec->format,
                                             .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                             .num_samplers = fragment_samplers,
                                             .num_storage_textures = 0,
@@ -208,6 +262,8 @@ ShaderPair render_get_shader_pair(AppState *as, const char *base_name)
     if (SDL_strcmp(base_name, "water") == 0) return load_shader_pair(as, base_name, 2, 1, 0);
     if (SDL_strcmp(base_name, "lit") == 0)   return load_shader_pair(as, base_name, 3, 1, 0);
     if (SDL_strcmp(base_name, "unlit") == 0) return load_shader_pair(as, base_name, 2, 0, 0);
+    if (SDL_strcmp(base_name, "shadow") == 0) return load_shader_pair(as, base_name, 2, 1, 0);
+    if (SDL_strcmp(base_name, "particle") == 0) return load_shader_pair(as, base_name, 1, 0, 0);
     if (SDL_strcmp(base_name, "tex") == 0)   return load_shader_pair(as, base_name, 2, 1, 1);
     return (ShaderPair){0};
 }
@@ -312,7 +368,7 @@ static bool upload_staging_to_copy_pass(AppState *as, SDL_GPUCopyPass *copy,
     if (!ensure_staging_capacity(as, size))
         return false;
 
-    void *mapped = SDL_MapGPUTransferBuffer(as->gpu, as->staging_buffer, false);
+    void *mapped = SDL_MapGPUTransferBuffer(as->gpu, as->staging_buffer, true);
     if (!mapped) {
         SDL_Log("MapGPUTransferBuffer failed: %s", SDL_GetError());
         return false;
@@ -335,15 +391,12 @@ static bool upload_staging_to_copy_pass(AppState *as, SDL_GPUCopyPass *copy,
 static bool prepare_ripple_vertices(AppState *as, SDL_GPUCopyPass *copy)
 {
     const int ring_stride = (RING_SEGS + 1) * 3;
-    float *rings = (float *)SDL_malloc((size_t)MAX_RIPPLES * ring_stride * sizeof(float));
-    if (!rings)
-        return false;
+    float *rings = as->ring_vertex_scratch;
 
     Uint32 bytes = 0;
     int active_index = 0;
 
     if (!ensure_staging_capacity(as, (Uint32)(MAX_RIPPLES * ring_stride * sizeof(float)))) {
-        SDL_free(rings);
         return false;
     }
 
@@ -376,54 +429,109 @@ static bool prepare_ripple_vertices(AppState *as, SDL_GPUCopyPass *copy)
     if (bytes > 0)
         ok = upload_staging_to_copy_pass(as, copy, as->ring_vbuf, rings, bytes);
 
-    SDL_free(rings);
-
     return ok;
 }
 
 static bool prepare_particle_vertices(AppState *as, SDL_GPUCopyPass *copy)
 {
-    float *verts = NULL;
+    float *verts = as->particle_vertex_scratch;
+    const float camera_right[3] = {
+        as->view[0][0], as->view[1][0], as->view[2][0]
+    };
+    const float camera_up[3] = {
+        as->view[0][1], as->view[1][1], as->view[2][1]
+    };
+    int active_indices[MAX_PARTICLES];
+    float depths[MAX_PARTICLES];
     int count = 0;
 
-    for (int i = 0; i < MAX_PARTICLES; i++) {
-        if (as->particles[i].active)
-            count++;
-    }
-
-    if (count == 0)
-        return true;
-
-    verts = (float *)SDL_malloc((size_t)count * 6 * 3 * sizeof(float));
-    if (!verts)
-        return false;
-
-    int vi = 0;
     for (int i = 0; i < MAX_PARTICLES; i++) {
         const Particle *p = &as->particles[i];
         if (!p->active)
             continue;
 
-        float s = 0.07f + 0.08f * p->life;
-        float quad[6][3] = {
-            {p->x - s, p->y + s, p->z},
-            {p->x + s, p->y + s, p->z},
-            {p->x + s, p->y - s, p->z},
-            {p->x - s, p->y + s, p->z},
-            {p->x + s, p->y - s, p->z},
-            {p->x - s, p->y - s, p->z}
+        float depth = as->view[0][2] * p->x
+                    + as->view[1][2] * p->y
+                    + as->view[2][2] * p->z
+                    + as->view[3][2];
+        int insertion = count;
+        while (insertion > 0 && depths[insertion - 1] < depth) {
+            active_indices[insertion] = active_indices[insertion - 1];
+            depths[insertion] = depths[insertion - 1];
+            insertion--;
+        }
+        active_indices[insertion] = i;
+        depths[insertion] = depth;
+        count++;
+    }
+
+    if (count == 0)
+        return true;
+
+    int vi = 0;
+    for (int order = 0; order < count; order++) {
+        int i = active_indices[order];
+        const Particle *p = &as->particles[i];
+
+        float screen_vx = p->vx * camera_right[0]
+                        + p->vy * camera_right[1]
+                        + p->vz * camera_right[2];
+        float screen_vy = p->vx * camera_up[0]
+                        + p->vy * camera_up[1]
+                        + p->vz * camera_up[2];
+        float screen_speed = sqrtf(screen_vx * screen_vx + screen_vy * screen_vy);
+        float axis_x = 0.f;
+        float axis_y = 1.f;
+        if (screen_speed > 0.05f) {
+            axis_x = screen_vx / screen_speed;
+            axis_y = screen_vy / screen_speed;
+        }
+
+        float long_dir[3];
+        float side_dir[3];
+        for (int component = 0; component < 3; component++) {
+            long_dir[component] = camera_right[component] * axis_x
+                                + camera_up[component] * axis_y;
+            side_dir[component] = camera_right[component] * axis_y
+                                - camera_up[component] * axis_x;
+        }
+
+        float speed = sqrtf(p->vx * p->vx + p->vy * p->vy + p->vz * p->vz);
+        float half_width = 0.045f + 0.055f * p->life;
+        float half_length = half_width * (1.f + SDL_min(speed * 0.20f, 1.8f));
+        float color_shift = (float)(i % 3) * 0.035f;
+        float color[4] = {
+            0.52f + color_shift,
+            0.84f + color_shift,
+            0.98f,
+            SDL_clamp(p->life * 1.35f, 0.f, 0.82f)
+        };
+        static const float corners[6][4] = {
+            {-1.f,  1.f, 0.f, 1.f},
+            { 1.f,  1.f, 1.f, 1.f},
+            { 1.f, -1.f, 1.f, 0.f},
+            {-1.f,  1.f, 0.f, 1.f},
+            { 1.f, -1.f, 1.f, 0.f},
+            {-1.f, -1.f, 0.f, 0.f}
         };
 
         for (int q = 0; q < 6; q++) {
-            verts[vi++] = quad[q][0];
-            verts[vi++] = quad[q][1];
-            verts[vi++] = quad[q][2];
+            float side = corners[q][0] * half_width;
+            float along = corners[q][1] * half_length;
+            verts[vi++] = p->x + side_dir[0] * side + long_dir[0] * along;
+            verts[vi++] = p->y + side_dir[1] * side + long_dir[1] * along;
+            verts[vi++] = p->z + side_dir[2] * side + long_dir[2] * along;
+            verts[vi++] = corners[q][2];
+            verts[vi++] = corners[q][3];
+            verts[vi++] = color[0];
+            verts[vi++] = color[1];
+            verts[vi++] = color[2];
+            verts[vi++] = color[3];
         }
     }
 
     Uint32 bytes = (Uint32)(vi * sizeof(float));
     bool ok = bytes > 0 && upload_staging_to_copy_pass(as, copy, as->part_vbuf, verts, bytes);
-    SDL_free(verts);
     return ok;
 }
 
@@ -493,12 +601,19 @@ static SDL_GPUGraphicsPipeline *create_pipeline(AppState *as,
                                                 Uint32 num_vb,
                                                 const SDL_GPUVertexAttribute *attrs,
                                                 Uint32 num_attrs,
-                                                SDL_GPUPrimitiveType prim,
-                                                bool enable_blend,
-                                                bool enable_depth_write,
-                                                SDL_GPUCompareOp depth_op,
-                                                bool enable_depth_test)
+                                                 SDL_GPUPrimitiveType prim,
+                                                 bool enable_blend,
+                                                 bool enable_depth_write,
+                                                 SDL_GPUCompareOp depth_op,
+                                                 bool enable_depth_test)
 {
+    if (!pair.vertex || !pair.fragment) {
+        SDL_Log("Cannot create graphics pipeline without both shader stages");
+        if (pair.vertex) SDL_ReleaseGPUShader(as->gpu, pair.vertex);
+        if (pair.fragment) SDL_ReleaseGPUShader(as->gpu, pair.fragment);
+        return NULL;
+    }
+
     SDL_GPUColorTargetBlendState blend = {
         .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
         .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
@@ -562,7 +677,42 @@ static SDL_GPUGraphicsPipeline *create_pipeline(AppState *as,
 
     SDL_ReleaseGPUShader(as->gpu, pair.vertex);
     SDL_ReleaseGPUShader(as->gpu, pair.fragment);
+    if (!pipeline)
+        SDL_Log("SDL_CreateGPUGraphicsPipeline failed: %s", SDL_GetError());
     return pipeline;
+}
+
+static void make_look_at_lh(mat4x4 view, const vec3 eye, const vec3 target, const vec3 up)
+{
+    vec3 forward;
+    vec3 right;
+    vec3 camera_up;
+
+    vec3_sub(forward, target, eye);
+    vec3_norm(forward, forward);
+    vec3_mul_cross(right, up, forward);
+    vec3_norm(right, right);
+    vec3_mul_cross(camera_up, forward, right);
+
+    mat4x4_identity(view);
+    view[0][0] = right[0];     view[0][1] = camera_up[0]; view[0][2] = forward[0];
+    view[1][0] = right[1];     view[1][1] = camera_up[1]; view[1][2] = forward[1];
+    view[2][0] = right[2];     view[2][1] = camera_up[2]; view[2][2] = forward[2];
+    view[3][0] = -vec3_mul_inner(right, eye);
+    view[3][1] = -vec3_mul_inner(camera_up, eye);
+    view[3][2] = -vec3_mul_inner(forward, eye);
+}
+
+static void make_perspective_lh_zo(mat4x4 projection, float fov_y, float aspect,
+                                   float near_z, float far_z)
+{
+    float y_scale = 1.f / tanf(fov_y * 0.5f);
+    SDL_memset(projection, 0, sizeof(mat4x4));
+    projection[0][0] = y_scale / aspect;
+    projection[1][1] = y_scale;
+    projection[2][2] = far_z / (far_z - near_z);
+    projection[2][3] = 1.f;
+    projection[3][2] = -(near_z * far_z) / (far_z - near_z);
 }
 
 static void update_camera_view(AppState *as)
@@ -576,8 +726,8 @@ static void update_camera_view(AppState *as)
     if (as->camera_shake_t > 0.f) {
         float t = as->camera_shake_t / CAMERA_SHAKE_DURATION;
         float mag = as->camera_shake_mag * (t * t) * (3.f - 2.f * t);
-        shake_x = (SDL_randf() * 2.f - 1.f) * mag;
-        shake_y = (SDL_randf() * 2.f - 1.f) * mag;
+        shake_x = (SDL_randf_r(&as->presentation_rng) * 2.f - 1.f) * mag;
+        shake_y = (SDL_randf_r(&as->presentation_rng) * 2.f - 1.f) * mag;
     }
 
     float eye_x = as->camera_target[0] + dist * cosf(pitch) * sinf(yaw) + shake_x;
@@ -586,7 +736,7 @@ static void update_camera_view(AppState *as)
 
     vec3 eye = { eye_x, eye_y, eye_z };
     vec3 up = { 0.f, 1.f, 0.f };
-    mat4x4_look_at(as->view, eye, as->camera_target, up);
+    make_look_at_lh(as->view, eye, as->camera_target, up);
 }
 
 void render_push_camera_uniform(SDL_GPUCommandBuffer *cmd, const AppState *as)
@@ -627,29 +777,26 @@ static void draw_lily_pads(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURende
 static void draw_duck_shadow(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
 {
     mat4x4 shadow;
-    float nmat[9];
     TransformUniform transform = {0};
-    ColorUniform color = {{0.f, 0.f, 0.f, SHADOW_ALPHA}};
     float shadow_alpha = SHADOW_ALPHA * (1.f - as->duck_y_offset / DUCK_BOB_AMPLITUDE * 0.3f);
-    color.u_color[3] = SDL_clamp(shadow_alpha, 0.05f, SHADOW_ALPHA);
+    FragmentUniform opacity = {
+        .u_alpha = SDL_clamp(shadow_alpha, 0.08f, SHADOW_ALPHA)
+    };
 
     mat4x4_identity(shadow);
-    mat4x4_translate_in_place(shadow, as->duck_x, 0.003f, as->duck_z);
+    mat4x4_translate_in_place(shadow, as->duck_x, SHADOW_HEIGHT, as->duck_z);
+    mat4x4_rotate_Y(shadow, shadow, -as->duck_angle);
     mat4x4_scale_aniso(shadow, shadow, SHADOW_SCALE_X, 1.f, SHADOW_SCALE_Z);
-    compute_nmat(nmat, shadow);
     SDL_memcpy(transform.u_model, shadow, sizeof(mat4x4));
-    fill_nmat_columns(transform.u_nmat, nmat);
 
-    FragmentUniform alpha = {.u_alpha = 1.0f};
-
-    SDL_BindGPUGraphicsPipeline(pass, as->lit_pipeline);
+    SDL_BindGPUGraphicsPipeline(pass, as->shadow_pipeline);
     SDL_BindGPUVertexBuffers(pass, 0, &(SDL_GPUBufferBinding){ as->disc_vbuf, 0 }, 1);
     SDL_PushGPUVertexUniformData(cmd, 1, &transform, (Uint32)sizeof(transform));
-    SDL_PushGPUVertexUniformData(cmd, 2, &color, (Uint32)sizeof(color));
-    SDL_PushGPUFragmentUniformData(cmd, 0, &alpha, (Uint32)sizeof(alpha));
+    SDL_PushGPUFragmentUniformData(cmd, 0, &opacity, (Uint32)sizeof(opacity));
     SDL_DrawGPUPrimitives(pass, (Uint32)as->disc_vert_count, 1, 0, 0);
 }
 
+#if QUAK_SHOW_DEBUG_GEOMETRY
 static void build_grid_vertices(float *verts)
 {
     static const float GRID_STEP = 2.0f;
@@ -696,6 +843,7 @@ static void draw_axes(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPass
     SDL_PushGPUVertexUniformData(cmd, 1, &color, (Uint32)sizeof(color));
     SDL_DrawGPUPrimitives(pass, 2, 1, 4, 0);
 }
+#endif
 
 static void draw_water(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPass *pass)
 {
@@ -741,7 +889,7 @@ static void draw_ripples(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderP
     }
 }
 
-static void draw_particles(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPass *pass)
+static void draw_particles(AppState *as, SDL_GPURenderPass *pass)
 {
     int count = 0;
 
@@ -749,9 +897,7 @@ static void draw_particles(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURende
         if (as->particles[i].active) count++;
     if (count == 0) return;
 
-    ColorUniform color = {{1.f, 1.f, 1.f, 0.90f}};
     SDL_BindGPUGraphicsPipeline(pass, as->particle_pipeline);
-    SDL_PushGPUVertexUniformData(cmd, 1, &color, (Uint32)sizeof(color));
     SDL_BindGPUVertexBuffers(pass, 0, &(SDL_GPUBufferBinding){ as->part_vbuf, 0 }, 1);
     SDL_DrawGPUPrimitives(pass, (Uint32)(count * 6), 1, 0, 0);
 }
@@ -766,15 +912,28 @@ bool render_init(AppState *as)
     int disc_floats = 0;
     ShaderPair pair;
 
-    as->gpu = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL, true, "direct3d12");
+    if (!SDL_GPUSupportsShaderFormats(SDL_GPU_SHADERFORMAT_DXIL, NULL)) {
+        SDL_Log("No SDL GPU backend supports the packaged DXIL shaders");
+        return false;
+    }
+
+    as->gpu = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL,
+                                  QUAK_GPU_VALIDATION != 0, NULL);
     if (!as->gpu) {
         SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
+        return false;
+    }
+    as->shader_format = SDL_GetGPUShaderFormats(as->gpu) & SDL_GPU_SHADERFORMAT_DXIL;
+    if (!as->shader_format) {
+        SDL_Log("Selected GPU driver '%s' does not expose a packaged shader format",
+                SDL_GetGPUDeviceDriver(as->gpu));
         return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(as->gpu, as->window)) {
         SDL_Log("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
         return false;
     }
+    as->gpu_window_claimed = true;
 
     as->swapchain_format = SDL_GetGPUSwapchainTextureFormat(as->gpu, as->window);
     SDL_SetGPUAllowedFramesInFlight(as->gpu, 2);
@@ -787,20 +946,34 @@ bool render_init(AppState *as)
         return false;
 
     gen_water_grid(&water_verts, &water_vcount, &water_idx, &as->water_idx_count);
+    if (!water_verts || !water_idx) {
+        SDL_Log("Unable to allocate water mesh");
+        return false;
+    }
     if (!create_buffer_from_data(as, SDL_GPU_BUFFERUSAGE_VERTEX,
                                  water_verts,
                                  (Uint32)(water_vcount * 5 * sizeof(float)),
-                                 &as->water_vbuf))
+                                 &as->water_vbuf)) {
+        SDL_free(water_verts);
+        SDL_free(water_idx);
         return false;
+    }
     if (!create_buffer_from_data(as, SDL_GPU_BUFFERUSAGE_INDEX,
                                  water_idx,
                                  (Uint32)(as->water_idx_count * sizeof(unsigned int)),
-                                 &as->water_ibuf))
+                                 &as->water_ibuf)) {
+        SDL_free(water_verts);
+        SDL_free(water_idx);
         return false;
+    }
     SDL_free(water_verts);
     SDL_free(water_idx);
 
     as->disc_vert_count = gen_disc_flat(&disc_verts);
+    if (!disc_verts || as->disc_vert_count == 0) {
+        SDL_Log("Unable to allocate lily-pad mesh");
+        return false;
+    }
     disc_floats = as->disc_vert_count * 6;
     if (!create_buffer_from_data(as, SDL_GPU_BUFFERUSAGE_VERTEX,
                                  disc_verts,
@@ -811,6 +984,7 @@ bool render_init(AppState *as)
     }
     SDL_free(disc_verts);
 
+#if QUAK_SHOW_DEBUG_GEOMETRY
     as->axis_vert_count = 6;
     if (!create_buffer_from_data(as, SDL_GPU_BUFFERUSAGE_VERTEX,
                                   AXIS_VERTS,
@@ -834,6 +1008,7 @@ bool render_init(AppState *as)
         }
         SDL_free(grid_verts);
     }
+#endif
 
     as->ring_vert_capacity = MAX_RIPPLES * (RING_SEGS + 1);
 
@@ -845,11 +1020,11 @@ bool render_init(AppState *as)
                                             .props = 0
                                         });
     as->part_vbuf = SDL_CreateGPUBuffer(as->gpu,
-                                        &(SDL_GPUBufferCreateInfo){
-                                            .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
-                                            .size = (Uint32)(as->part_vert_capacity * 3 * sizeof(float)),
-                                            .props = 0
-                                        });
+                                         &(SDL_GPUBufferCreateInfo){
+                                             .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                             .size = (Uint32)(as->part_vert_capacity * 9 * sizeof(float)),
+                                             .props = 0
+                                         });
     if (!as->ring_vbuf || !as->part_vbuf)
         return false;
 
@@ -882,12 +1057,23 @@ bool render_init(AppState *as)
         SDL_GPU_PRIMITIVETYPE_LINESTRIP,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
-    pair = render_get_shader_pair(as, "unlit");
-    as->particle_pipeline = create_pipeline(as, pair,
-        &(SDL_GPUVertexBufferDescription){ 0, 3 * sizeof(float), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0 }, 1,
+    pair = render_get_shader_pair(as, "shadow");
+    as->shadow_pipeline = create_pipeline(as, pair,
+        &(SDL_GPUVertexBufferDescription){ 0, 6 * sizeof(float), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0 }, 1,
         (SDL_GPUVertexAttribute[]){
             { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 }
         }, 1,
+        SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
+
+    pair = render_get_shader_pair(as, "particle");
+    as->particle_pipeline = create_pipeline(as, pair,
+        &(SDL_GPUVertexBufferDescription){ 0, 9 * sizeof(float), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0 }, 1,
+        (SDL_GPUVertexAttribute[]){
+            { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 },
+            { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float) },
+            { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 5 * sizeof(float) }
+        }, 3,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
@@ -902,7 +1088,8 @@ bool render_init(AppState *as)
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         false, true, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
-    if (!as->water_pipeline || !as->lit_pipeline || !as->unlit_pipeline || !as->particle_pipeline || !as->duck_pipeline)
+    if (!as->water_pipeline || !as->lit_pipeline || !as->unlit_pipeline
+        || !as->shadow_pipeline || !as->particle_pipeline || !as->duck_pipeline)
         return false;
 
     as->camera_target[0] = CAM_TARGET_X;
@@ -917,7 +1104,9 @@ bool render_init(AppState *as)
     as->mouse_captured = false;
 
     render_resize(as, pixel_w, pixel_h);
-    SDL_Log("render_init: SDL GPU driver=%s", SDL_GetGPUDeviceDriver(as->gpu));
+    update_camera_view(as);
+    SDL_Log("render_init: SDL GPU driver=%s, validation=%s",
+            SDL_GetGPUDeviceDriver(as->gpu), QUAK_GPU_VALIDATION ? "on" : "off");
     return true;
 }
 
@@ -928,10 +1117,10 @@ void render_resize(AppState *as, int win_w, int win_h)
 
     as->win_w = win_w;
     as->win_h = win_h;
-    mat4x4_perspective(as->proj,
-                       3.14159265f / 3.f,
-                       (float)safe_w / (float)safe_h,
-                       1.0f, 100.f);
+    make_perspective_lh_zo(as->proj,
+                           3.14159265f / 3.f,
+                           (float)safe_w / (float)safe_h,
+                           1.0f, 100.f);
 
     if (as->gpu && ((Uint32)safe_w != as->depth_w || (Uint32)safe_h != as->depth_h)) {
         SDL_WaitForGPUIdle(as->gpu);
@@ -969,7 +1158,7 @@ void render_frame(AppState *as)
     if (swap_w != as->depth_w || swap_h != as->depth_h) {
         SDL_WaitForGPUIdle(as->gpu);
         if (!create_depth_texture(as, swap_w, swap_h)) {
-            SDL_CancelGPUCommandBuffer(cmd);
+            SDL_SubmitGPUCommandBuffer(cmd);
             return;
         }
         render_resize(as, (int)swap_w, (int)swap_h);
@@ -1004,7 +1193,7 @@ void render_frame(AppState *as)
         });
 
     if (!pass) {
-        SDL_CancelGPUCommandBuffer(cmd);
+        SDL_SubmitGPUCommandBuffer(cmd);
         return;
     }
 
@@ -1019,14 +1208,16 @@ void render_frame(AppState *as)
                        });
 
     render_push_camera_uniform(cmd, as);
+#if QUAK_SHOW_DEBUG_GEOMETRY
     draw_grid(cmd, as, pass);
     draw_axes(cmd, as, pass);
+#endif
     draw_lily_pads(as, cmd, pass);
-    draw_duck_shadow(as, cmd, pass);
     duck_draw(as, cmd, pass);
     draw_water(cmd, as, pass);
+    draw_duck_shadow(as, cmd, pass);
     draw_ripples(cmd, as, pass);
-    draw_particles(cmd, as, pass);
+    draw_particles(as, pass);
     SDL_EndGPURenderPass(pass);
     SDL_SubmitGPUCommandBuffer(cmd);
 }
@@ -1040,6 +1231,7 @@ void render_cleanup(AppState *as)
     if (as->water_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->water_pipeline);
     if (as->lit_pipeline)   SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->lit_pipeline);
     if (as->unlit_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->unlit_pipeline);
+    if (as->shadow_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->shadow_pipeline);
     if (as->particle_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->particle_pipeline);
     if (as->duck_pipeline)  SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->duck_pipeline);
 
@@ -1047,26 +1239,31 @@ void render_cleanup(AppState *as)
     if (as->water_ibuf) SDL_ReleaseGPUBuffer(as->gpu, as->water_ibuf);
     if (as->disc_vbuf)  SDL_ReleaseGPUBuffer(as->gpu, as->disc_vbuf);
     if (as->axis_vbuf)  SDL_ReleaseGPUBuffer(as->gpu, as->axis_vbuf);
+    if (as->grid_vbuf)  SDL_ReleaseGPUBuffer(as->gpu, as->grid_vbuf);
     if (as->ring_vbuf)  SDL_ReleaseGPUBuffer(as->gpu, as->ring_vbuf);
     if (as->part_vbuf)  SDL_ReleaseGPUBuffer(as->gpu, as->part_vbuf);
     if (as->staging_buffer) SDL_ReleaseGPUTransferBuffer(as->gpu, as->staging_buffer);
     if (as->depth_tex) SDL_ReleaseGPUTexture(as->gpu, as->depth_tex);
 
-    SDL_ReleaseWindowFromGPUDevice(as->gpu, as->window);
+    if (as->gpu_window_claimed)
+        SDL_ReleaseWindowFromGPUDevice(as->gpu, as->window);
     SDL_DestroyGPUDevice(as->gpu);
 
     as->gpu = NULL;
     as->water_pipeline = NULL;
     as->lit_pipeline = NULL;
     as->unlit_pipeline = NULL;
+    as->shadow_pipeline = NULL;
     as->particle_pipeline = NULL;
     as->duck_pipeline = NULL;
     as->water_vbuf = NULL;
     as->water_ibuf = NULL;
     as->disc_vbuf = NULL;
     as->axis_vbuf = NULL;
+    as->grid_vbuf = NULL;
     as->ring_vbuf = NULL;
     as->part_vbuf = NULL;
     as->staging_buffer = NULL;
     as->depth_tex = NULL;
+    as->gpu_window_claimed = false;
 }
