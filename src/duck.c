@@ -19,6 +19,10 @@ typedef struct {
     float _pad[3];
 } FragmentUniform;
 
+typedef struct {
+    vec4 u_environment;
+} EnvironmentUniform;
+
 static void apply_obj_transform(const float *pos, float *out_pos)
 {
     const float tx = -0.12f;
@@ -398,17 +402,27 @@ bool duck_init(AppState *as)
     return true;
 }
 
-void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
+static void duck_draw_part(AppState *as, SDL_GPUCommandBuffer *cmd,
+                           SDL_GPURenderPass *pass, bool reflection)
 {
     if (!cmd || !pass || !as->duck_vbuf || !as->duck_tex || !as->duck_sampler
-        || as->duck_obj_count == 0 || !as->duck_pipeline)
+        || as->duck_obj_count == 0
+        || (reflection ? !as->duck_reflection_pipeline : !as->duck_pipeline))
         return;
 
     mat4x4 model;
     mat4x4 refl;
+    float body_y = as->duck_y_offset + as->duck_animation.body_y_offset;
+    float heading = as->duck_angle + as->duck_animation.spin_angle;
     mat4x4_identity(model);
-    mat4x4_translate_in_place(model, as->duck_x, as->duck_y_offset, as->duck_z);
-    mat4x4_rotate_Y(model, model, DUCK_MODEL_YAW(as->duck_angle));
+    mat4x4_translate_in_place(model, as->duck_x, body_y, as->duck_z);
+    mat4x4_rotate_Y(model, model, DUCK_MODEL_YAW(heading));
+    mat4x4_rotate_Z(model, model, as->duck_animation.body_roll);
+    mat4x4_rotate_X(model, model, as->duck_animation.body_pitch);
+    mat4x4_scale_aniso(model, model,
+                       as->duck_animation.body_scale_x,
+                       as->duck_animation.body_scale_y,
+                       as->duck_animation.body_scale_z);
     mat4x4_rotate_X(model, model, 3.14159265f / 2.0f);
     mat4x4_scale_aniso(model, model, DUCK_SCALE, DUCK_SCALE, DUCK_SCALE);
     mat4x4_translate_in_place(model, 0.0f, DUCK_OBJ_LIFT, 0.0f);
@@ -418,6 +432,7 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
     TransformUniform transform = {0};
     TransformUniform refl_transform = {0};
     FragmentUniform frag = {.u_alpha = as->duck_reflection_alpha};
+    EnvironmentUniform environment = {{as->environment.day_mix, 0.f, 0.f, 0.f}};
     compute_nmat(nmat, model);
     SDL_memcpy(transform.u_model, model, sizeof(mat4x4));
     transform.u_nmat[0][0] = nmat[0];
@@ -431,8 +446,14 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
     transform.u_nmat[2][2] = nmat[8];
 
     mat4x4_identity(refl);
-    mat4x4_translate_in_place(refl, as->duck_x, -as->duck_y_offset, as->duck_z);
-    mat4x4_rotate_Y(refl, refl, DUCK_MODEL_YAW(as->duck_angle));
+    mat4x4_translate_in_place(refl, as->duck_x, -body_y, as->duck_z);
+    mat4x4_rotate_Y(refl, refl, DUCK_MODEL_YAW(heading));
+    mat4x4_rotate_Z(refl, refl, -as->duck_animation.body_roll);
+    mat4x4_rotate_X(refl, refl, -as->duck_animation.body_pitch);
+    mat4x4_scale_aniso(refl, refl,
+                       as->duck_animation.body_scale_x,
+                       as->duck_animation.body_scale_y,
+                       as->duck_animation.body_scale_z);
     mat4x4_rotate_X(refl, refl, -3.14159265f / 2.0f);
     mat4x4_scale_aniso(refl, refl, DUCK_SCALE, -DUCK_SCALE, DUCK_SCALE);
     mat4x4_translate_in_place(refl, 0.0f, DUCK_OBJ_LIFT, 0.0f);
@@ -449,7 +470,8 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
     refl_transform.u_nmat[2][1] = refl_nmat[7];
     refl_transform.u_nmat[2][2] = refl_nmat[8];
 
-    SDL_BindGPUGraphicsPipeline(pass, as->duck_pipeline);
+    SDL_BindGPUGraphicsPipeline(pass, reflection
+        ? as->duck_reflection_pipeline : as->duck_pipeline);
     SDL_BindGPUVertexBuffers(pass, 0,
                              &(SDL_GPUBufferBinding){ as->duck_vbuf, 0 }, 1);
 
@@ -458,15 +480,26 @@ void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
         .sampler = as->duck_sampler
     };
     SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+    SDL_PushGPUFragmentUniformData(cmd, 1, &environment,
+                                   (Uint32)sizeof(environment));
 
-    SDL_PushGPUVertexUniformData(cmd, 1, &refl_transform, (Uint32)sizeof(refl_transform));
+    frag.u_alpha = reflection ? as->duck_reflection_alpha : 1.f;
+    SDL_PushGPUVertexUniformData(cmd, 1,
+        reflection ? (const void *)&refl_transform : (const void *)&transform,
+        (Uint32)sizeof(transform));
     SDL_PushGPUFragmentUniformData(cmd, 0, &frag, (Uint32)sizeof(frag));
     SDL_DrawGPUPrimitives(pass, (Uint32)as->duck_obj_count, 1, 0, 0);
+}
 
-    frag.u_alpha = 1.0f;
-    SDL_PushGPUVertexUniformData(cmd, 1, &transform, (Uint32)sizeof(transform));
-    SDL_PushGPUFragmentUniformData(cmd, 0, &frag, (Uint32)sizeof(frag));
-    SDL_DrawGPUPrimitives(pass, (Uint32)as->duck_obj_count, 1, 0, 0);
+void duck_draw(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
+{
+    duck_draw_part(as, cmd, pass, false);
+}
+
+void duck_draw_reflection(AppState *as, SDL_GPUCommandBuffer *cmd,
+                          SDL_GPURenderPass *pass)
+{
+    duck_draw_part(as, cmd, pass, true);
 }
 
 void duck_cleanup(AppState *as)

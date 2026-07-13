@@ -16,7 +16,11 @@ Do not reintroduce SDL_Renderer or the retired OpenGL renderer. The GLSL files u
 ```text
 src/main.c       SDL callbacks, fixed timestep, lifecycle, event dispatch
 src/input.c/.h   Unified keyboard/gamepad/touch intent and pond picking
+src/interaction.c/.h Fixed-size FIFO for one-shot gameplay interactions
+src/activities.c/.h Free-play director and interaction dispatch
 src/game.c/.h    Duck simulation and effects
+src/pond_objects.c/.h Generic bounded pond-object state and hit testing
+src/duck_animation.c/.h Whole-duck animation state
 src/render.c/.h  SDL GPU resources, camera, pipelines, frame submission
 src/duck.c/.h    OBJ/JPEG loading and duck drawing
 src/audio.c/.h   Procedural audio and stream pools
@@ -47,9 +51,9 @@ SDL_AppResult SDL_AppIterate(void *appstate);
 void SDL_AppQuit(void *appstate, SDL_AppResult result);
 ```
 
-Simulation runs at `FIXED_TIMESTEP` (60 Hz) through `game_step`. Rendering occurs once per `SDL_AppIterate`. Keep one-shot input feedback event-driven, but keep movement and other persistent state in the fixed simulation.
+Simulation runs at `FIXED_TIMESTEP` (60 Hz) through `game_step`. Rendering occurs once per `SDL_AppIterate`. SDL callbacks enqueue one-shot gameplay actions in `InteractionQueue`; `activities_process_events` consumes them at the start of a fixed step. Persistent movement intent is sampled directly during each fixed step.
 
-Input devices produce `PlayerIntent`. Touch uses normalized SDL coordinates, unprojects through the current projection/view matrices, and intersects the pond plane at Y=0. Filter synthetic touch/mouse events in both directions.
+Input devices produce `PlayerIntent`. Touch uses normalized SDL coordinates, unprojects through the unshaken logical picking view, and intersects the pond plane at Y=0. Normal left-mouse input is translated through the same touch path for desktop testing; Ctrl+left-drag retains camera orbit. Camera shake remains presentation-only. Filter SDL's synthetic touch/mouse events in both directions.
 
 The world and camera are left-handed:
 

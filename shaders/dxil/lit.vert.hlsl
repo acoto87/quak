@@ -27,6 +27,11 @@ cbuffer ColorCB : register(b2, space1)
     float4 u_color;
 }
 
+cbuffer EnvironmentCB : register(b3, space1)
+{
+    EnvironmentUniform environment;
+}
+
 VSOutput main(VSInput input)
 {
     VSOutput output;
@@ -34,7 +39,10 @@ VSOutput main(VSInput input)
                         + transform.u_nmat[1].xyz * input.norm.y
                         + transform.u_nmat[2].xyz * input.norm.z);
     float d = max(dot(wn, SUN_DIR), 0.0);
-    output.color = float4(u_color.rgb * (0.35 + d * 0.65), u_color.a);
+    float day_mix = environment.u_environment.x;
+    float ambient = lerp(0.18, 0.35, day_mix);
+    float directional = lerp(0.20, 0.65, day_mix);
+    output.color = float4(u_color.rgb * (ambient + d * directional), u_color.a);
     output.position = mul(camera.u_proj,
                           mul(camera.u_view,
                               mul(transform.u_model, float4(input.pos, 1.0))));

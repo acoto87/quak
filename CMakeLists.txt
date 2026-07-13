@@ -92,13 +92,21 @@ endforeach()
 
 add_custom_target(quak_dxil_shaders ALL DEPENDS ${DXIL_SHADER_OUTPUTS})
 
+set(QUAK_GAMEPLAY_SOURCES
+    src/game.c
+    src/input.c
+    src/interaction.c
+    src/pond_objects.c
+    src/duck_animation.c
+    src/activities.c
+)
+
 add_executable(quak
+    ${QUAK_GAMEPLAY_SOURCES}
     src/main.c
     src/render.c
     src/duck.c
     src/audio.c
-    src/game.c
-    src/input.c
 )
 add_dependencies(quak quak_dxil_shaders)
 target_include_directories(quak SYSTEM PRIVATE "${SDL3_INCLUDE_DIR}")
@@ -145,12 +153,32 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(quak_tests
         tests/test_game.c
-        src/game.c
-        src/input.c
+        ${QUAK_GAMEPLAY_SOURCES}
     )
     target_include_directories(quak_tests SYSTEM PRIVATE "${SDL3_INCLUDE_DIR}")
     target_include_directories(quak_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(quak_tests PRIVATE "${SDL3_LIBRARY}")
     quak_enable_warnings(quak_tests)
     add_test(NAME quak_simulation COMMAND quak_tests)
+
+    add_executable(quak_interaction_tests
+        tests/test_interaction.c
+        src/interaction.c
+    )
+    target_include_directories(quak_interaction_tests SYSTEM PRIVATE "${SDL3_INCLUDE_DIR}")
+    target_include_directories(quak_interaction_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(quak_interaction_tests PRIVATE "${SDL3_LIBRARY}")
+    quak_enable_warnings(quak_interaction_tests)
+    add_test(NAME quak_interaction_queue COMMAND quak_interaction_tests)
+
+    add_executable(quak_audio_tests
+        tests/test_audio.c
+        src/audio.c
+    )
+    target_include_directories(quak_audio_tests SYSTEM PRIVATE "${SDL3_INCLUDE_DIR}")
+    target_include_directories(quak_audio_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(quak_audio_tests PRIVATE "${SDL3_LIBRARY}")
+    quak_enable_warnings(quak_audio_tests)
+    add_test(NAME quak_audio COMMAND quak_audio_tests)
+    set_tests_properties(quak_audio PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy")
 endif()

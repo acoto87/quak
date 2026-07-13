@@ -18,4 +18,9 @@ struct WaterUniform
     float4 u_ripple_data[32];
 };
 
+struct EnvironmentUniform
+{
+    float4 u_environment;
+};
+
 static const float3 SUN_DIR = normalize(float3(0.5, 1.0, 0.3));

@@ -4,6 +4,11 @@
 #include <SDL3/SDL_gpu.h>
 #include <linmath.h>
 
+#include "activities.h"
+#include "duck_animation.h"
+#include "interaction.h"
+#include "pond_objects.h"
+
 /* ── Game-wide constants ─────────────────────────────────────────────────── */
 
 #define WINDOW_W        800
@@ -41,8 +46,36 @@
 #define CAMERA_SHAKE_MAGNITUDE  0.12f
 #define DUCK_COLLISION_RADIUS   0.5f
 #define LILY_BOUNCE_COEFF       0.4f
-#define LILY_HIT_COOLDOWN       0.2f
 #define DUCK_WORLD_BOUND        (WORLD_BOUND - DUCK_COLLISION_RADIUS)
+#define DUCK_TOUCH_RADIUS       1.25f
+#define DUCK_SLEEP_AFTER_SECONDS 12.0f
+#define DUCK_WAKE_DURATION      0.8f
+#define SLEEP_BUBBLE_PERIOD     0.8f
+
+#define FINGER_TRAIL_SPACING    0.35f
+#define MAX_TRAIL_RIPPLES_PER_STEP 3
+
+#define POPPABLE_BUBBLE_TARGET  3
+#define POPPABLE_BUBBLE_TOUCH_MARGIN 1.5f
+#define POPPABLE_BUBBLE_RESPAWN 1.5f
+
+#define LILY_NOTE_COUNT         5
+#define LILY_NOTE_COOLDOWN      0.15f
+#define LILY_FEEDBACK_COOLDOWN  0.2f
+
+#define ZOOMIES_TAP_WINDOW      1.2f
+#define ZOOMIES_REQUIRED_TAPS   4
+#define ZOOMIES_DURATION        2.2f
+#define ZOOMIES_COOLDOWN        5.0f
+#define ZOOMIES_RADIUS          2.4f
+#define ZOOMIES_ANGULAR_SPEED   3.2f
+
+#define SPLASHES_PER_RAINBOW    10
+#define BUBBLE_POPS_PER_RAINBOW 8
+#define CELEBRATION_COOLDOWN    8.0f
+
+#define NIGHT_FIREFLY_COUNT     6
+#define ENVIRONMENT_CYCLE_SECONDS 30.0f
 
 /* Simulation */
 #define FIXED_TIMESTEP          (1.0 / 60.0)
@@ -51,6 +84,7 @@
 
 /* Touch */
 #define MAX_TOUCHES             10
+#define MAX_TRAIL_SAMPLES       64
 #define TOUCH_SMOOTHING         0.35f
 #define TOUCH_TAP_MAX_NS        300000000ULL
 #define TOUCH_TAP_MAX_DISTANCE  0.04f
@@ -61,8 +95,8 @@
 #define RIPPLE_SPEED    4.5f
 #define RIPPLE_MAX_R    8.0f
 #define MAX_PARTICLES   64
+#define MAX_RENDER_BILLBOARDS (MAX_PARTICLES + MAX_POND_OBJECTS)
 #define RING_SEGS       48
-#define LILY_PAD_COUNT  6
 
 /* Audio */
 #define QUACK_CHANNELS  4
@@ -90,28 +124,68 @@
 typedef struct {
     float x, z;     /* world XZ centre */
     float radius;
+    float speed;
+    float max_radius;
+    float max_alpha;
     float alpha;
     bool  active;
 } Ripple;
 
+typedef enum {
+    PARTICLE_WATER_DROPLET,
+    PARTICLE_BUBBLE,
+    PARTICLE_FOAM,
+    PARTICLE_SPARKLE,
+    PARTICLE_RAIN,
+    PARTICLE_FIREFLY,
+    PARTICLE_RAINBOW,
+    PARTICLE_SLEEP_BUBBLE
+} ParticleKind;
+
 typedef struct {
+    bool active;
+    ParticleKind kind;
     float x, y, z;
     float vx, vy, vz;
-    float life;     /* 1 → 0 */
-    bool  active;
+    float life;
+    float max_life;
+    float size;
+    float red, green, blue, alpha;
 } Particle;
 
-typedef struct {
-    float x, z, r;
-} LilyPad;
-
-typedef struct {
+typedef struct PlayerIntent {
     bool has_swim_target;
     float swim_target_x;
     float swim_target_z;
     float move_x;
     float move_z;
 } PlayerIntent;
+
+typedef enum {
+    QUACK_VARIANT_NORMAL,
+    QUACK_VARIANT_TINY,
+    QUACK_VARIANT_DEEP,
+    QUACK_VARIANT_HICCUP,
+    QUACK_VARIANT_SURPRISED,
+    QUACK_VARIANT_COUNT
+} QuackVariant;
+
+typedef struct {
+    Sint16 *pcm;
+    int pcm_bytes;
+} AudioClip;
+
+typedef struct {
+    float day_mix;
+    float target_day_mix;
+    float cycle_timer;
+    bool night;
+} EnvironmentState;
+
+typedef struct {
+    int obstacle_id;
+    int turn_sign;
+} DuckAvoidanceState;
 
 typedef struct {
     SDL_TouchID touch_id;
@@ -122,25 +196,31 @@ typedef struct {
     float down_x, down_y;
     float max_distance_sq;
     float world_x, world_z;
+    float gesture_world_x, gesture_world_z;
+    float world_travel_distance;
     bool world_valid;
+    bool gesture_world_valid;
     Uint64 down_timestamp_ns;
     Uint64 activation_sequence;
 } TouchPoint;
 
 typedef struct {
-    bool ripple_requested;
-    bool tap_requested;
-    float effect_x;
-    float effect_z;
-} InputAction;
+    float x, z;
+    Uint64 owner_sequence;
+    bool reset;
+} TrailSample;
 
 typedef struct {
     TouchPoint touches[MAX_TOUCHES];
     int primary_touch;
     Uint64 next_sequence;
+    TrailSample trail_samples[MAX_TRAIL_SAMPLES];
+    int trail_read;
+    int trail_write;
+    int trail_count;
 } InputState;
 
-typedef struct {
+typedef struct AppState {
     SDL_Window    *window;
     int            win_w, win_h;
 
@@ -160,6 +240,7 @@ typedef struct {
     SDL_GPUGraphicsPipeline *shadow_pipeline;
     SDL_GPUGraphicsPipeline *particle_pipeline;
     SDL_GPUGraphicsPipeline *duck_pipeline;
+    SDL_GPUGraphicsPipeline *duck_reflection_pipeline;
 
     SDL_GPUBuffer        *water_vbuf;
     SDL_GPUBuffer        *water_ibuf;
@@ -190,11 +271,13 @@ typedef struct {
     SDL_GPUTransferBuffer *staging_buffer;
     Uint32                 staging_size;
     float                  ring_vertex_scratch[MAX_RIPPLES * (RING_SEGS + 1) * 3];
-    float                  particle_vertex_scratch[MAX_PARTICLES * 6 * 9];
+    float                  particle_vertex_scratch[MAX_RENDER_BILLBOARDS * 6 * 9];
+    int                    part_vert_count;
 
     /* Camera */
     mat4x4 proj;
     mat4x4 view;
+    mat4x4 picking_view;
     vec3 camera_target;
     float camera_distance;
     float camera_pitch;
@@ -203,6 +286,7 @@ typedef struct {
     float last_mouse_x;
     float last_mouse_y;
     bool mouse_captured;
+    bool mouse_touch_active;
 
     /* Duck state (XZ world plane) */
     float duck_x, duck_z;
@@ -215,14 +299,21 @@ typedef struct {
     bool  duck_was_moving;
     float movement_ripple_timer;
     float quack_cooldown;
-    float lily_hit_cooldown;
     float camera_shake_t;
     float camera_shake_mag;
     float duck_reflection_alpha;
+    DuckAnimation duck_animation;
+    DuckAvoidanceState duck_avoidance;
 
     /* Input */
     SDL_Gamepad *gamepad;
     InputState input;
+    InteractionQueue interaction_queue;
+
+    /* Activities and reusable pond entities */
+    ActivityState activity;
+    PondObjectPool pond_objects;
+    EnvironmentState environment;
 
     /* Effects */
     Ripple   ripples[MAX_RIPPLES];
@@ -234,25 +325,29 @@ typedef struct {
     SDL_AudioDeviceID  audio_dev;
     SDL_AudioStream   *quack_streams[QUACK_CHANNELS];
     SDL_AudioStream   *splash_streams[SPLASH_CHANNELS];
+    SDL_AudioStream   *lily_note_streams[LILY_NOTE_COUNT];
     int                quack_next;
     int                splash_next;
-    Sint16            *quack_pcm;
-    Sint16            *splash_pcm;
-    int                quack_pcm_bytes;
-    int                splash_pcm_bytes;
+    AudioClip          quack_clips[QUACK_VARIANT_COUNT];
+    AudioClip          splash_clip;
+    AudioClip          bubble_pop_clip;
+    AudioClip          lily_note_clips[LILY_NOTE_COUNT];
 
     /* Timing */
     Uint64 last_perf;
     Uint64 perf_freq;
+    Uint64 interaction_clock_ns;
+    Uint64 simulation_tick;
+    Uint64 interaction_overflow_count;
     double accumulator;
     float  elapsed;
     bool   suspended;
     bool   event_watch_registered;
+    SDL_AtomicInt lifecycle_suspended;
+    SDL_AtomicInt lifecycle_reset_pending;
 
     /* Independent streams keep render frequency from changing simulation RNG. */
     Uint64 simulation_rng;
     Uint64 presentation_rng;
     Uint64 audio_rng;
 } AppState;
-
-extern const LilyPad LILY_PADS[LILY_PAD_COUNT];

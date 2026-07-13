@@ -35,6 +35,10 @@ typedef struct {
 } WaterUniform;
 
 typedef struct {
+    vec4 u_environment;
+} EnvironmentUniform;
+
+typedef struct {
     SDL_GPUShader *vertex;
     SDL_GPUShader *fragment;
 } ShaderPair;
@@ -45,17 +49,18 @@ typedef struct {
     const char *suffix;
 } ShaderAssetSpec;
 
+typedef struct {
+    float x, y, z;
+    float vx, vy, vz;
+    float size;
+    float red, green, blue, alpha;
+    float life_ratio;
+    float depth;
+    ParticleKind kind;
+} RenderBillboard;
+
 static const ShaderAssetSpec DXIL_SHADER_ASSETS = {
     SDL_GPU_SHADERFORMAT_DXIL, "dxil", ".dxil"
-};
-
-const LilyPad LILY_PADS[LILY_PAD_COUNT] = {
-    {-6.0f, -6.5f, 1.2f},
-    { 7.0f, -5.5f, 1.0f},
-    {-5.5f,  6.5f, 1.4f},
-    { 6.0f,  6.0f, 1.1f},
-    { 0.5f, -7.5f, 0.9f},
-    { 7.5f,  2.5f, 1.2f}
 };
 
 #if QUAK_SHOW_DEBUG_GEOMETRY
@@ -259,12 +264,12 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
 
 ShaderPair render_get_shader_pair(AppState *as, const char *base_name)
 {
-    if (SDL_strcmp(base_name, "water") == 0) return load_shader_pair(as, base_name, 2, 1, 0);
-    if (SDL_strcmp(base_name, "lit") == 0)   return load_shader_pair(as, base_name, 3, 1, 0);
+    if (SDL_strcmp(base_name, "water") == 0) return load_shader_pair(as, base_name, 2, 2, 0);
+    if (SDL_strcmp(base_name, "lit") == 0)   return load_shader_pair(as, base_name, 4, 1, 0);
     if (SDL_strcmp(base_name, "unlit") == 0) return load_shader_pair(as, base_name, 2, 0, 0);
     if (SDL_strcmp(base_name, "shadow") == 0) return load_shader_pair(as, base_name, 2, 1, 0);
     if (SDL_strcmp(base_name, "particle") == 0) return load_shader_pair(as, base_name, 1, 0, 0);
-    if (SDL_strcmp(base_name, "tex") == 0)   return load_shader_pair(as, base_name, 2, 1, 1);
+    if (SDL_strcmp(base_name, "tex") == 0)   return load_shader_pair(as, base_name, 2, 2, 1);
     return (ShaderPair){0};
 }
 
@@ -441,38 +446,65 @@ static bool prepare_particle_vertices(AppState *as, SDL_GPUCopyPass *copy)
     const float camera_up[3] = {
         as->view[0][1], as->view[1][1], as->view[2][1]
     };
-    int active_indices[MAX_PARTICLES];
-    float depths[MAX_PARTICLES];
+    RenderBillboard billboards[MAX_RENDER_BILLBOARDS];
     int count = 0;
 
     for (int i = 0; i < MAX_PARTICLES; i++) {
         const Particle *p = &as->particles[i];
         if (!p->active)
             continue;
-
-        float depth = as->view[0][2] * p->x
-                    + as->view[1][2] * p->y
-                    + as->view[2][2] * p->z
-                    + as->view[3][2];
-        int insertion = count;
-        while (insertion > 0 && depths[insertion - 1] < depth) {
-            active_indices[insertion] = active_indices[insertion - 1];
-            depths[insertion] = depths[insertion - 1];
-            insertion--;
-        }
-        active_indices[insertion] = i;
-        depths[insertion] = depth;
-        count++;
+        billboards[count++] = (RenderBillboard){
+            .x = p->x, .y = p->y, .z = p->z,
+            .vx = p->vx, .vy = p->vy, .vz = p->vz,
+            .size = p->size,
+            .red = p->red, .green = p->green, .blue = p->blue,
+            .alpha = p->alpha,
+            .life_ratio = p->max_life > 0.f
+                        ? SDL_clamp(p->life / p->max_life, 0.f, 1.f) : 0.f,
+            .kind = p->kind
+        };
+    }
+    for (int i = 0; i < MAX_POND_OBJECTS && count < MAX_RENDER_BILLBOARDS; i++) {
+        const PondObject *object = &as->pond_objects.objects[i];
+        if (!pond_object_is_visible(object)
+            || (object->kind != POND_OBJECT_POPPABLE_BUBBLE
+                && object->kind != POND_OBJECT_FIREFLY))
+            continue;
+        float bob = sinf(object->phase * 2.f) * 0.05f;
+        billboards[count++] = (RenderBillboard){
+            .x = object->x, .y = object->y + bob, .z = object->z,
+            .vx = object->vx, .vy = object->vy, .vz = object->vz,
+            .size = object->radius,
+            .red = object->red, .green = object->green, .blue = object->blue,
+            .alpha = object->alpha,
+            .life_ratio = 1.f,
+            .kind = object->kind == POND_OBJECT_FIREFLY
+                  ? PARTICLE_FIREFLY : PARTICLE_BUBBLE
+        };
     }
 
+    for (int i = 0; i < count; i++) {
+        billboards[i].depth = as->view[0][2] * billboards[i].x
+                            + as->view[1][2] * billboards[i].y
+                            + as->view[2][2] * billboards[i].z
+                            + as->view[3][2];
+        RenderBillboard current = billboards[i];
+        int insertion = i;
+        while (insertion > 0 && billboards[insertion - 1].depth < current.depth) {
+            billboards[insertion] = billboards[insertion - 1];
+            insertion--;
+        }
+        billboards[insertion] = current;
+    }
+
+    as->part_vert_count = 0;
     if (count == 0)
         return true;
 
     int vi = 0;
     for (int order = 0; order < count; order++) {
-        int i = active_indices[order];
-        const Particle *p = &as->particles[i];
-
+        const RenderBillboard *p = &billboards[order];
+        float life_ratio = p->life_ratio;
         float screen_vx = p->vx * camera_right[0]
                         + p->vy * camera_right[1]
                         + p->vz * camera_right[2];
@@ -480,9 +512,12 @@ static bool prepare_particle_vertices(AppState *as, SDL_GPUCopyPass *copy)
                         + p->vy * camera_up[1]
                         + p->vz * camera_up[2];
         float screen_speed = sqrtf(screen_vx * screen_vx + screen_vy * screen_vy);
+        bool round = p->kind == PARTICLE_BUBBLE
+                  || p->kind == PARTICLE_SLEEP_BUBBLE
+                  || p->kind == PARTICLE_FIREFLY;
         float axis_x = 0.f;
         float axis_y = 1.f;
-        if (screen_speed > 0.05f) {
+        if (!round && screen_speed > 0.05f) {
             axis_x = screen_vx / screen_speed;
             axis_y = screen_vy / screen_speed;
         }
@@ -497,24 +532,15 @@ static bool prepare_particle_vertices(AppState *as, SDL_GPUCopyPass *copy)
         }
 
         float speed = sqrtf(p->vx * p->vx + p->vy * p->vy + p->vz * p->vz);
-        float half_width = 0.045f + 0.055f * p->life;
-        float half_length = half_width * (1.f + SDL_min(speed * 0.20f, 1.8f));
-        float color_shift = (float)(i % 3) * 0.035f;
-        float color[4] = {
-            0.52f + color_shift,
-            0.84f + color_shift,
-            0.98f,
-            SDL_clamp(p->life * 1.35f, 0.f, 0.82f)
-        };
+        float half_width = p->size * (0.65f + 0.35f * life_ratio);
+        float stretch = round ? 1.f : 1.f + SDL_min(speed * 0.20f, 1.8f);
+        float half_length = half_width * stretch;
+        float color[4] = {p->red, p->green, p->blue, p->alpha * life_ratio};
         static const float corners[6][4] = {
-            {-1.f,  1.f, 0.f, 1.f},
-            { 1.f,  1.f, 1.f, 1.f},
-            { 1.f, -1.f, 1.f, 0.f},
-            {-1.f,  1.f, 0.f, 1.f},
-            { 1.f, -1.f, 1.f, 0.f},
-            {-1.f, -1.f, 0.f, 0.f}
+            {-1.f,  1.f, 0.f, 1.f}, { 1.f,  1.f, 1.f, 1.f},
+            { 1.f, -1.f, 1.f, 0.f}, {-1.f,  1.f, 0.f, 1.f},
+            { 1.f, -1.f, 1.f, 0.f}, {-1.f, -1.f, 0.f, 0.f}
         };
-
         for (int q = 0; q < 6; q++) {
             float side = corners[q][0] * half_width;
             float along = corners[q][1] * half_length;
@@ -532,6 +558,7 @@ static bool prepare_particle_vertices(AppState *as, SDL_GPUCopyPass *copy)
 
     Uint32 bytes = (Uint32)(vi * sizeof(float));
     bool ok = bytes > 0 && upload_staging_to_copy_pass(as, copy, as->part_vbuf, verts, bytes);
+    as->part_vert_count = vi / 9;
     return ok;
 }
 
@@ -600,8 +627,9 @@ static SDL_GPUGraphicsPipeline *create_pipeline(AppState *as,
                                                 const SDL_GPUVertexBufferDescription *vb_desc,
                                                 Uint32 num_vb,
                                                 const SDL_GPUVertexAttribute *attrs,
-                                                Uint32 num_attrs,
+                                                 Uint32 num_attrs,
                                                  SDL_GPUPrimitiveType prim,
+                                                 SDL_GPUCullMode cull_mode,
                                                  bool enable_blend,
                                                  bool enable_depth_write,
                                                  SDL_GPUCompareOp depth_op,
@@ -642,7 +670,7 @@ static SDL_GPUGraphicsPipeline *create_pipeline(AppState *as,
             .primitive_type = prim,
             .rasterizer_state = {
                 .fill_mode = SDL_GPU_FILLMODE_FILL,
-                .cull_mode = SDL_GPU_CULLMODE_NONE,
+                .cull_mode = cull_mode,
                 .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
                 .depth_bias_constant_factor = 0.f,
                 .depth_bias_clamp = 0.f,
@@ -721,6 +749,8 @@ static void update_camera_view(AppState *as)
     float yaw = as->camera_yaw;
     float dist = as->camera_distance;
 
+    render_update_picking_view(as);
+
     float shake_x = 0.f;
     float shake_y = 0.f;
     if (as->camera_shake_t > 0.f) {
@@ -739,6 +769,20 @@ static void update_camera_view(AppState *as)
     make_look_at_lh(as->view, eye, as->camera_target, up);
 }
 
+void render_update_picking_view(AppState *as)
+{
+    float pitch = as->camera_pitch;
+    float yaw = as->camera_yaw;
+    float dist = as->camera_distance;
+    vec3 eye = {
+        as->camera_target[0] + dist * cosf(pitch) * sinf(yaw),
+        as->camera_target[1] + dist * sinf(pitch),
+        as->camera_target[2] - dist * cosf(pitch) * cosf(yaw)
+    };
+    vec3 up = {0.f, 1.f, 0.f};
+    make_look_at_lh(as->picking_view, eye, as->camera_target, up);
+}
+
 void render_push_camera_uniform(SDL_GPUCommandBuffer *cmd, const AppState *as)
 {
     CameraUniform camera;
@@ -749,27 +793,41 @@ void render_push_camera_uniform(SDL_GPUCommandBuffer *cmd, const AppState *as)
 
 static void draw_lily_pads(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass)
 {
-    FragmentUniform alpha = {.u_alpha = 1.0f};
-
     SDL_BindGPUGraphicsPipeline(pass, as->lit_pipeline);
     SDL_BindGPUVertexBuffers(pass, 0, &(SDL_GPUBufferBinding){ as->disc_vbuf, 0 }, 1);
-    SDL_PushGPUFragmentUniformData(cmd, 0, &alpha, (Uint32)sizeof(alpha));
 
-    for (int i = 0; i < LILY_PAD_COUNT; i++) {
-        mat4x4 lily;
+    for (int i = 0; i < MAX_POND_OBJECTS; i++) {
+        const PondObject *object = &as->pond_objects.objects[i];
+        if (!pond_object_is_visible(object) || object->kind != POND_OBJECT_LILY_PAD)
+            continue;
+
+        float scale = object->radius * object->scale;
+        if (scale <= 0.f)
+            continue;
+
+        mat4x4 model;
         float nmat[9];
         TransformUniform transform = {0};
-        ColorUniform color = {{0.10f, 0.55f, 0.10f, 1.f}};
+        ColorUniform color = {{object->red, object->green, object->blue, 1.f}};
+        FragmentUniform alpha = {.u_alpha = object->alpha};
+        EnvironmentUniform environment = {{as->environment.day_mix, 0.f, 0.f, 0.f}};
 
-        mat4x4_identity(lily);
-        mat4x4_translate_in_place(lily, LILY_PADS[i].x, 0.01f, LILY_PADS[i].z);
-        mat4x4_scale_aniso(lily, lily, LILY_PADS[i].r, 1.f, LILY_PADS[i].r);
-        compute_nmat(nmat, lily);
-        SDL_memcpy(transform.u_model, lily, sizeof(mat4x4));
+        mat4x4_identity(model);
+        mat4x4_translate_in_place(model, object->x,
+                                 object->y + object->lily_motion.height_offset,
+                                 object->z);
+        mat4x4_rotate_Y(model, model, object->rotation);
+        mat4x4_rotate_X(model, model, object->lily_motion.tilt);
+        mat4x4_scale_aniso(model, model, scale, 1.f, scale);
+        compute_nmat(nmat, model);
+        SDL_memcpy(transform.u_model, model, sizeof(mat4x4));
         fill_nmat_columns(transform.u_nmat, nmat);
 
         SDL_PushGPUVertexUniformData(cmd, 1, &transform, (Uint32)sizeof(transform));
         SDL_PushGPUVertexUniformData(cmd, 2, &color, (Uint32)sizeof(color));
+        SDL_PushGPUVertexUniformData(cmd, 3, &environment,
+                                     (Uint32)sizeof(environment));
+        SDL_PushGPUFragmentUniformData(cmd, 0, &alpha, (Uint32)sizeof(alpha));
         SDL_DrawGPUPrimitives(pass, (Uint32)as->disc_vert_count, 1, 0, 0);
     }
 }
@@ -778,15 +836,21 @@ static void draw_duck_shadow(AppState *as, SDL_GPUCommandBuffer *cmd, SDL_GPURen
 {
     mat4x4 shadow;
     TransformUniform transform = {0};
-    float shadow_alpha = SHADOW_ALPHA * (1.f - as->duck_y_offset / DUCK_BOB_AMPLITUDE * 0.3f);
+    float duck_height = as->duck_y_offset + as->duck_animation.body_y_offset;
+    float shadow_alpha = SHADOW_ALPHA * (1.f - duck_height / DUCK_BOB_AMPLITUDE * 0.3f);
+    shadow_alpha *= 0.3f + as->environment.day_mix * 0.7f;
     FragmentUniform opacity = {
         .u_alpha = SDL_clamp(shadow_alpha, 0.08f, SHADOW_ALPHA)
     };
 
     mat4x4_identity(shadow);
     mat4x4_translate_in_place(shadow, as->duck_x, SHADOW_HEIGHT, as->duck_z);
-    mat4x4_rotate_Y(shadow, shadow, -as->duck_angle);
-    mat4x4_scale_aniso(shadow, shadow, SHADOW_SCALE_X, 1.f, SHADOW_SCALE_Z);
+    mat4x4_rotate_Y(shadow, shadow,
+                    -(as->duck_angle + as->duck_animation.spin_angle));
+    mat4x4_scale_aniso(shadow, shadow,
+                       SHADOW_SCALE_X * as->duck_animation.body_scale_x,
+                       1.f,
+                       SHADOW_SCALE_Z * as->duck_animation.body_scale_z);
     SDL_memcpy(transform.u_model, shadow, sizeof(mat4x4));
 
     SDL_BindGPUGraphicsPipeline(pass, as->shadow_pipeline);
@@ -848,6 +912,7 @@ static void draw_axes(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPass
 static void draw_water(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPass *pass)
 {
     WaterUniform water = {0};
+    EnvironmentUniform environment = {{as->environment.day_mix, 0.f, 0.f, 0.f}};
     water.u_time_pad[0] = as->elapsed;
     for (int i = 0; i < MAX_RIPPLES; i++) {
         water.u_ripple_data[i][0] = as->ripples[i].active ? as->ripples[i].x : 0.f;
@@ -859,6 +924,8 @@ static void draw_water(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderPas
     SDL_BindGPUGraphicsPipeline(pass, as->water_pipeline);
     SDL_PushGPUVertexUniformData(cmd, 1, &water, (Uint32)sizeof(water));
     SDL_PushGPUFragmentUniformData(cmd, 0, &water.u_time_pad, (Uint32)sizeof(vec4));
+    SDL_PushGPUFragmentUniformData(cmd, 1, &environment,
+                                   (Uint32)sizeof(environment));
     SDL_BindGPUVertexBuffers(pass, 0, &(SDL_GPUBufferBinding){ as->water_vbuf, 0 }, 1);
     SDL_BindGPUIndexBuffer(pass, &(SDL_GPUBufferBinding){ as->water_ibuf, 0 },
                            SDL_GPU_INDEXELEMENTSIZE_32BIT);
@@ -891,15 +958,11 @@ static void draw_ripples(SDL_GPUCommandBuffer *cmd, AppState *as, SDL_GPURenderP
 
 static void draw_particles(AppState *as, SDL_GPURenderPass *pass)
 {
-    int count = 0;
-
-    for (int i = 0; i < MAX_PARTICLES; i++)
-        if (as->particles[i].active) count++;
-    if (count == 0) return;
+    if (as->part_vert_count <= 0) return;
 
     SDL_BindGPUGraphicsPipeline(pass, as->particle_pipeline);
     SDL_BindGPUVertexBuffers(pass, 0, &(SDL_GPUBufferBinding){ as->part_vbuf, 0 }, 1);
-    SDL_DrawGPUPrimitives(pass, (Uint32)(count * 6), 1, 0, 0);
+    SDL_DrawGPUPrimitives(pass, (Uint32)as->part_vert_count, 1, 0, 0);
 }
 
 bool render_init(AppState *as)
@@ -1012,7 +1075,7 @@ bool render_init(AppState *as)
 
     as->ring_vert_capacity = MAX_RIPPLES * (RING_SEGS + 1);
 
-    as->part_vert_capacity = MAX_PARTICLES * 6;
+    as->part_vert_capacity = MAX_RENDER_BILLBOARDS * 6;
     as->ring_vbuf = SDL_CreateGPUBuffer(as->gpu,
                                         &(SDL_GPUBufferCreateInfo){
                                             .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
@@ -1036,6 +1099,7 @@ bool render_init(AppState *as)
             { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float) }
         }, 2,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_NONE,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
     pair = render_get_shader_pair(as, "lit");
@@ -1046,6 +1110,7 @@ bool render_init(AppState *as)
             { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float) }
         }, 2,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_NONE,
         true, true, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
     pair = render_get_shader_pair(as, "unlit");
@@ -1055,6 +1120,7 @@ bool render_init(AppState *as)
             { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 }
         }, 1,
         SDL_GPU_PRIMITIVETYPE_LINESTRIP,
+        SDL_GPU_CULLMODE_NONE,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
     pair = render_get_shader_pair(as, "shadow");
@@ -1064,6 +1130,7 @@ bool render_init(AppState *as)
             { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 }
         }, 1,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_NONE,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
     pair = render_get_shader_pair(as, "particle");
@@ -1075,6 +1142,7 @@ bool render_init(AppState *as)
             { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 5 * sizeof(float) }
         }, 3,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_NONE,
         true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
     pair = render_get_shader_pair(as, "tex");
@@ -1086,10 +1154,24 @@ bool render_init(AppState *as)
             { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 5 * sizeof(float) }
         }, 3,
         SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_NONE,
         false, true, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
 
+    pair = render_get_shader_pair(as, "tex");
+    as->duck_reflection_pipeline = create_pipeline(as, pair,
+        &(SDL_GPUVertexBufferDescription){ 0, 8 * sizeof(float), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0 }, 1,
+        (SDL_GPUVertexAttribute[]){
+            { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 },
+            { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float) },
+            { 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 5 * sizeof(float) }
+        }, 3,
+        SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_CULLMODE_FRONT,
+        true, false, SDL_GPU_COMPAREOP_LESS_OR_EQUAL, true);
+
     if (!as->water_pipeline || !as->lit_pipeline || !as->unlit_pipeline
-        || !as->shadow_pipeline || !as->particle_pipeline || !as->duck_pipeline)
+        || !as->shadow_pipeline || !as->particle_pipeline || !as->duck_pipeline
+        || !as->duck_reflection_pipeline)
         return false;
 
     as->camera_target[0] = CAM_TARGET_X;
@@ -1164,12 +1246,19 @@ void render_frame(AppState *as)
         render_resize(as, (int)swap_w, (int)swap_h);
     }
 
+    float day_mix = as->environment.day_mix;
+    SDL_FColor clear_color = {
+        0.025f + day_mix * (0.53f - 0.025f),
+        0.045f + day_mix * (0.81f - 0.045f),
+        0.12f + day_mix * (0.98f - 0.12f),
+        1.f
+    };
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd,
         &(SDL_GPUColorTargetInfo){
             .texture = swapchain,
             .mip_level = 0,
             .layer_or_depth_plane = 0,
-            .clear_color = {0.53f, 0.81f, 0.98f, 1.f},
+            .clear_color = clear_color,
             .load_op = SDL_GPU_LOADOP_CLEAR,
             .store_op = SDL_GPU_STOREOP_STORE,
             .resolve_texture = NULL,
@@ -1215,6 +1304,7 @@ void render_frame(AppState *as)
     draw_lily_pads(as, cmd, pass);
     duck_draw(as, cmd, pass);
     draw_water(cmd, as, pass);
+    duck_draw_reflection(as, cmd, pass);
     draw_duck_shadow(as, cmd, pass);
     draw_ripples(cmd, as, pass);
     draw_particles(as, pass);
@@ -1234,6 +1324,8 @@ void render_cleanup(AppState *as)
     if (as->shadow_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->shadow_pipeline);
     if (as->particle_pipeline) SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->particle_pipeline);
     if (as->duck_pipeline)  SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->duck_pipeline);
+    if (as->duck_reflection_pipeline)
+        SDL_ReleaseGPUGraphicsPipeline(as->gpu, as->duck_reflection_pipeline);
 
     if (as->water_vbuf) SDL_ReleaseGPUBuffer(as->gpu, as->water_vbuf);
     if (as->water_ibuf) SDL_ReleaseGPUBuffer(as->gpu, as->water_ibuf);
@@ -1256,6 +1348,7 @@ void render_cleanup(AppState *as)
     as->shadow_pipeline = NULL;
     as->particle_pipeline = NULL;
     as->duck_pipeline = NULL;
+    as->duck_reflection_pipeline = NULL;
     as->water_vbuf = NULL;
     as->water_ibuf = NULL;
     as->disc_vbuf = NULL;
