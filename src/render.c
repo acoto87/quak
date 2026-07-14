@@ -1,4 +1,5 @@
 #include "render.h"
+#include "assets.h"
 #include "duck.h"
 #include <math.h>
 
@@ -61,6 +62,10 @@ typedef struct {
 
 static const ShaderAssetSpec DXIL_SHADER_ASSETS = {
     SDL_GPU_SHADERFORMAT_DXIL, "dxil", ".dxil"
+};
+
+static const ShaderAssetSpec SPIRV_SHADER_ASSETS = {
+    SDL_GPU_SHADERFORMAT_SPIRV, "spirv", ".spv"
 };
 
 #if QUAK_SHOW_DEBUG_GEOMETRY
@@ -172,26 +177,66 @@ static int gen_disc_flat(float **out)
     return N * 3;
 }
 
-static const ShaderAssetSpec *get_shader_asset_spec(const AppState *as)
+static const ShaderAssetSpec *get_shader_asset_spec(SDL_GPUShaderFormat format)
 {
-    if (as->shader_format == SDL_GPU_SHADERFORMAT_DXIL)
+    if (format == SDL_GPU_SHADERFORMAT_DXIL)
         return &DXIL_SHADER_ASSETS;
+
+    if (format == SDL_GPU_SHADERFORMAT_SPIRV)
+        return &SPIRV_SHADER_ASSETS;
+
+    SDL_Log("Unsupported packaged shader format: 0x%x", (unsigned int)format);
     return NULL;
 }
 
-static char *load_binary_asset(const ShaderAssetSpec *spec, const char *relative_path,
-                               size_t *out_size)
+static SDL_GPUShaderFormat required_shader_format(void)
 {
-    const char *base = SDL_GetBasePath();
-    char path[1024];
-    void *raw;
+#if defined(__ANDROID__)
+    return SDL_GPU_SHADERFORMAT_SPIRV;
+#else
+    return SDL_GPU_SHADERFORMAT_DXIL;
+#endif
+}
 
-    SDL_snprintf(path, sizeof(path), "%sassets/shaders/%s/%s",
-                 base ? base : "", spec->directory, relative_path);
-    raw = SDL_LoadFile(path, out_size);
-    if (!raw)
-        SDL_Log("Shader asset: cannot open '%s' — %s", path, SDL_GetError());
-    return (char *)raw;
+static void *load_shader_asset(SDL_GPUShaderFormat format, const char *shader_name,
+                               SDL_GPUShaderStage stage, size_t *code_size)
+{
+    const ShaderAssetSpec *spec = get_shader_asset_spec(format);
+    const char *stage_name = NULL;
+    char relative_path[256];
+    char resolved_path[512];
+    int written;
+
+    if (!spec || !shader_name || !code_size)
+        return NULL;
+
+    if (stage == SDL_GPU_SHADERSTAGE_VERTEX)
+        stage_name = "vert";
+    else if (stage == SDL_GPU_SHADERSTAGE_FRAGMENT)
+        stage_name = "frag";
+    else {
+        SDL_Log("Unsupported shader stage %u for '%s'", (unsigned int)stage, shader_name);
+        return NULL;
+    }
+
+    written = SDL_snprintf(relative_path, sizeof(relative_path),
+                           "shaders/%s/%s.%s%s",
+                           spec->directory, shader_name, stage_name, spec->suffix);
+    if (written < 0 || (size_t)written >= sizeof(relative_path)) {
+        SDL_Log("Shader path is too long for '%s'", shader_name);
+        return NULL;
+    }
+
+    if (!quak_get_asset_path(resolved_path, sizeof(resolved_path), relative_path))
+        return NULL;
+
+    void *code = SDL_LoadFile(resolved_path, code_size);
+    if (!code) {
+        SDL_Log("Could not load shader '%s': %s", resolved_path, SDL_GetError());
+        return NULL;
+    }
+
+    return code;
 }
 
 static ShaderPair load_shader_pair(AppState *as, const char *base_name,
@@ -200,22 +245,14 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
                                    Uint32 fragment_samplers)
 {
     ShaderPair pair = {0};
-    char vert_name[64], frag_name[64];
     size_t vert_size = 0, frag_size = 0;
     Uint8 *vert_code = NULL;
     Uint8 *frag_code = NULL;
-    const ShaderAssetSpec *spec = get_shader_asset_spec(as);
 
-    if (!spec) {
-        SDL_Log("No shader asset mapping for GPU format 0x%x", (unsigned int)as->shader_format);
-        return pair;
-    }
-
-    SDL_snprintf(vert_name, sizeof(vert_name), "%s.vert%s", base_name, spec->suffix);
-    SDL_snprintf(frag_name, sizeof(frag_name), "%s.frag%s", base_name, spec->suffix);
-
-    vert_code = (Uint8 *)load_binary_asset(spec, vert_name, &vert_size);
-    frag_code = (Uint8 *)load_binary_asset(spec, frag_name, &frag_size);
+    vert_code = (Uint8 *)load_shader_asset(as->shader_format, base_name,
+                                           SDL_GPU_SHADERSTAGE_VERTEX, &vert_size);
+    frag_code = (Uint8 *)load_shader_asset(as->shader_format, base_name,
+                                           SDL_GPU_SHADERSTAGE_FRAGMENT, &frag_size);
     if (!vert_code || !frag_code) {
         SDL_free(vert_code);
         SDL_free(frag_code);
@@ -224,26 +261,26 @@ static ShaderPair load_shader_pair(AppState *as, const char *base_name,
 
     pair.vertex = SDL_CreateGPUShader(as->gpu,
                                       &(SDL_GPUShaderCreateInfo){
-                                          .code_size = vert_size,
-                                          .code = vert_code,
-                                          .entrypoint = "main",
-                                          .format = spec->format,
-                                          .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                          .num_samplers = 0,
-                                          .num_storage_textures = 0,
+                                           .code_size = vert_size,
+                                           .code = vert_code,
+                                           .entrypoint = "main",
+                                           .format = as->shader_format,
+                                           .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                           .num_samplers = 0,
+                                           .num_storage_textures = 0,
                                           .num_storage_buffers = 0,
                                           .num_uniform_buffers = vertex_uniforms,
                                           .props = 0
                                       });
     pair.fragment = SDL_CreateGPUShader(as->gpu,
                                         &(SDL_GPUShaderCreateInfo){
-                                            .code_size = frag_size,
-                                            .code = frag_code,
-                                            .entrypoint = "main",
-                                            .format = spec->format,
-                                            .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                            .num_samplers = fragment_samplers,
-                                            .num_storage_textures = 0,
+                                             .code_size = frag_size,
+                                             .code = frag_code,
+                                             .entrypoint = "main",
+                                             .format = as->shader_format,
+                                             .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                             .num_samplers = fragment_samplers,
+                                             .num_storage_textures = 0,
                                             .num_storage_buffers = 0,
                                             .num_uniform_buffers = fragment_uniforms,
                                             .props = 0
@@ -974,26 +1011,40 @@ bool render_init(AppState *as)
     float *disc_verts = NULL;
     int disc_floats = 0;
     ShaderPair pair;
+    SDL_GPUShaderFormat shader_format;
+    bool enable_validation;
 
-    if (!SDL_GPUSupportsShaderFormats(SDL_GPU_SHADERFORMAT_DXIL, NULL)) {
-        SDL_Log("No SDL GPU backend supports the packaged DXIL shaders");
+    if (!as || !as->window)
+        return false;
+
+    shader_format = required_shader_format();
+
+    if (!SDL_GPUSupportsShaderFormats(shader_format, NULL)) {
+        SDL_Log("No SDL GPU backend supports shader format 0x%x",
+                (unsigned int)shader_format);
         return false;
     }
 
-    as->gpu = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL,
-                                  QUAK_GPU_VALIDATION != 0, NULL);
+#if defined(__ANDROID__)
+    enable_validation = false;
+#else
+    enable_validation = QUAK_GPU_VALIDATION != 0;
+#endif
+
+    as->gpu = SDL_CreateGPUDevice(shader_format, enable_validation, NULL);
     if (!as->gpu) {
         SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         return false;
     }
-    as->shader_format = SDL_GetGPUShaderFormats(as->gpu) & SDL_GPU_SHADERFORMAT_DXIL;
-    if (!as->shader_format) {
-        SDL_Log("Selected GPU driver '%s' does not expose a packaged shader format",
-                SDL_GetGPUDeviceDriver(as->gpu));
-        return false;
-    }
+
+    as->shader_format = shader_format;
+
+    SDL_Log("SDL GPU driver: %s", SDL_GetGPUDeviceDriver(as->gpu));
+
     if (!SDL_ClaimWindowForGPUDevice(as->gpu, as->window)) {
         SDL_Log("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
+        SDL_DestroyGPUDevice(as->gpu);
+        as->gpu = NULL;
         return false;
     }
     as->gpu_window_claimed = true;

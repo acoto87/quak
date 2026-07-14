@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <math.h>
+#include "assets.h"
 #include "duck.h"
 #include "render.h"
 
@@ -371,15 +372,20 @@ static bool create_texture_from_jpg(AppState *as, const char *path,
 
 bool duck_init(AppState *as)
 {
-    const char *base = SDL_GetBasePath();
-    char obj_path[1024], tex_path[1024];
+    char obj_path[512];
+    char tex_path[512];
     float *verts = NULL;
     int vc = 0;
 
-    SDL_snprintf(obj_path, sizeof(obj_path),
-                 "%sassets/10602_Rubber_Duck_v1_L3.obj", base ? base : "");
-    SDL_snprintf(tex_path, sizeof(tex_path),
-                 "%sassets/10602_Rubber_Duck_v1_diffuse.jpg", base ? base : "");
+    if (!quak_get_asset_path(obj_path, sizeof(obj_path),
+                             "10602_Rubber_Duck_v1_L3.obj")) {
+        return false;
+    }
+
+    if (!quak_get_asset_path(tex_path, sizeof(tex_path),
+                             "10602_Rubber_Duck_v1_diffuse.jpg")) {
+        return false;
+    }
 
     if (!load_obj_mesh(obj_path, &verts, &vc))
         return false;

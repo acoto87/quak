@@ -31,6 +31,8 @@ tests/           CPU-side simulation/input tests
 
 ## Build And Test
 
+Windows desktop:
+
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles" -DBUILD_TESTING=ON
 cmake --build build
@@ -38,7 +40,23 @@ ctest --test-dir build --output-on-failure
 .\build\quak.exe
 ```
 
-`dxc` is required. A successful build stages `SDL3.dll`, assets, and all required DXIL shader blobs next to the executable. Debug builds enable SDL GPU validation. `QUAK_SHOW_DEBUG_GEOMETRY` is off by default.
+Or with presets:
+
+```powershell
+cmake --preset windows-debug
+cmake --build --preset windows-debug
+ctest --preset windows-debug
+.\build\windows-debug\quak.exe
+```
+
+Android:
+
+```powershell
+.\android\gradlew.bat :app:assembleDebug
+.\android\gradlew.bat :app:installDebug
+```
+
+`dxc` is required for the Windows desktop path. The Android build requires JDK 17, SDK 35, NDK 28.2.13676358, CMake 3.22.1, Gradle 8.12 via the wrapper, and `shadercross` on PATH or in `tools/SDL3_shadercross-*/bin`. A successful Windows build stages `SDL3.dll`, assets, and all required DXIL shader blobs next to the executable. A successful Android build emits `android/app/build/outputs/apk/debug/quak-debug.apk` containing SDL3, the native library, asset files, and SPIR-V shader binaries. Debug builds enable SDL GPU validation on Windows; `QUAK_SHOW_DEBUG_GEOMETRY` is off by default.
 
 ## Architecture
 

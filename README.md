@@ -15,23 +15,38 @@ Quack & Splash is a zero-frustration, toddler-friendly 3D pond toy. Swim a duck 
 
 ## Current Platform Support
 
-The reproducible build currently supports **Windows x64 with Direct3D 12**. The repository vendors SDL **3.4.4** Windows x64 headers and binaries and packages DXIL shaders.
+The repository now has two build paths:
 
-SDL GPU can target Vulkan and Metal, but this project does not yet package SPIR-V or Metal shader binaries. Linux and Android builds are therefore roadmap items, not currently supported configurations.
+- **Windows x64 desktop** with Direct3D 12 and DXIL shaders
+- **Android arm64-v8a** with an APK built through Gradle/CMake, packaged SDL3 AAR support, and SPIR-V shaders
+
+The Windows build vendors SDL **3.4.4** Windows x64 headers and binaries and packages DXIL shaders. The Android build packages the same assets plus generated SPIR-V shader binaries into the APK.
 
 ## Requirements
 
+Windows desktop build:
+
 - Windows 10 or newer with a Direct3D 12-capable GPU and driver
 - CMake 3.21 or newer
-- A C11 compiler (the checked-in build is tested with MSVC-compatible `cl.exe`)
+- A C11 compiler (the checked-in build is tested with MSVC-compatible `cl.exe` and MinGW Makefiles)
 - DirectX Shader Compiler (`dxc`) on `PATH`, with Shader Model 6.0 support
 - The vendored SDL 3.4.4 files under `deps/`
 
-Configuration fails early when SDL or DXC is unavailable. GPU validation is enabled in Debug builds and disabled in Release builds.
+Android build:
+
+- JDK 17
+- Android SDK 35
+- Android NDK `28.2.13676358`
+- CMake `3.22.1`
+- Gradle `8.12` (via the checked-in wrapper)
+- Android platform tools with `adb`
+- `shadercross` from the SDL3 shadercross tool, available on `PATH` or in `tools/SDL3_shadercross-*/bin`
+
+Configuration fails early when SDL, `dxc`, or the Android toolchain pieces are unavailable. GPU validation is enabled in Debug builds and disabled in Release builds.
 
 ## Build
 
-Using the existing build directory:
+Windows (direct configure):
 
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles" -DBUILD_TESTING=ON
@@ -39,7 +54,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Using presets:
+Windows (presets):
 
 ```powershell
 cmake --preset windows-debug
@@ -47,17 +62,41 @@ cmake --build --preset windows-debug
 ctest --preset windows-debug
 ```
 
-For a production build:
+For a production Windows build:
 
 ```powershell
 cmake --preset windows-release
 cmake --build --preset windows-release
 ```
 
-The build stages `quak.exe`, `SDL3.dll`, source assets, and all required DXIL shader blobs into the executable directory. Run the existing build with:
+The Windows build stages `quak.exe`, `SDL3.dll`, source assets, and all required DXIL shader blobs into the executable directory. Run the build with:
 
 ```powershell
 .\build\quak.exe
+```
+
+Or with the preset binary directory:
+
+```powershell
+.\build\windows-debug\quak.exe
+```
+
+Android (from the repository root):
+
+```powershell
+.\android\gradlew.bat :app:assembleDebug
+```
+
+Install and launch the debug APK on a connected device or emulator:
+
+```powershell
+.\android\gradlew.bat :app:installDebug
+```
+
+The APK is emitted at:
+
+```text
+android/app/build/outputs/apk/debug/quak-debug.apk
 ```
 
 Set `-DQUAK_SHOW_DEBUG_GEOMETRY=ON` during configuration to render the developer grid and axes. It is off by default.

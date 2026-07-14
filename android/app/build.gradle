@@ -1,0 +1,102 @@
+plugins {
+    id "com.android.application"
+}
+
+def quakAbi = "arm64-v8a"
+
+android {
+    namespace "com.acoto87.quak"
+
+    compileSdk 35
+    ndkVersion "28.2.13676358"
+
+    defaultConfig {
+        applicationId "com.acoto87.quak"
+
+        /*
+         * Vulkan begins at API 24. SDL itself can support older versions,
+         * but this renderer has no OpenGL ES fallback.
+         */
+        minSdk 24
+        targetSdk 35
+
+        versionCode 1
+        versionName "0.1.0"
+
+        ndk {
+            abiFilters quakAbi
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments(
+                    "-DBUILD_TESTING=OFF",
+                    "-DQUAK_GPU_VALIDATION=OFF"
+                )
+
+                targets "main"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+        }
+
+        release {
+            minifyEnabled false
+
+            proguardFiles(
+                getDefaultProguardFile(
+                    "proguard-android-optimize.txt"
+                ),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("../../CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = ["../../assets"]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+android.applicationVariants.all { variant ->
+    variant.outputs.all {
+        outputFileName = "${rootProject.name}-${variant.name}.apk"
+    }
+}
+
+afterEvaluate {
+    ["Debug", "Release"].each { buildType ->
+        def mergeAssetsTask = tasks.findByName("merge${buildType}Assets")
+        def buildCMakeTask = tasks.findByName("buildCMake${buildType}[${quakAbi}][main]")
+
+        if (mergeAssetsTask != null && buildCMakeTask != null) {
+            mergeAssetsTask.dependsOn(buildCMakeTask)
+        }
+    }
+}
+
+dependencies {
+    implementation files("libs/SDL3-3.4.4.aar")
+}
